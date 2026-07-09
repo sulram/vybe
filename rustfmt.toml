@@ -1,0 +1,4 @@
+# Stock rustfmt, pinned to the crate's edition. Default heuristics keep method
+# chains vertical (one link per line) — the reading rhythm the sketches are
+# written in — rather than collapsing short chains onto a single line.
+edition = "2024"

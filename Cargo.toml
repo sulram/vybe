@@ -1,0 +1,37 @@
+[package]
+name = "vybe"
+version = "0.0.1"
+edition = "2024"
+rust-version = "1.85"
+description = "Sovereign creative-coding engine on Rust + wgpu (WebGPU) — one core, many sugars; the chain syntax is the product."
+authors = ["Marlus Araujo <mar251@gmail.com>"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sulram/vybe"
+readme = "README.md"
+keywords = ["creative-coding", "graphics", "wgpu", "webgpu", "generative-art"]
+categories = ["rendering", "visualization", "multimedia"]
+# Ship only what a consumer needs; dev docs and infra stay in the repo.
+exclude = [".github/", "docs/", "CLAUDE.md", "rustfmt.toml"]
+
+[dependencies]
+wgpu = "30"
+winit = "0.30"
+pollster = "0.4"       # blocks on wgpu's async without pulling a whole runtime
+bytemuck = { version = "1", features = ["derive"] } # structs -> bytes for the GPU
+
+# The tweak panel (feature-gated; zero cost in default builds). egui core is
+# pure math and egui-winit matches our winit; the RENDERER is ours (tweak.rs),
+# because egui-wgpu pins wgpu 29 while the core rides 30.
+egui = { version = "0.35", features = ["bytemuck"], optional = true }
+egui-winit = { version = "0.35", optional = true }
+
+[features]
+# The knobs panel over live() sketches. tune()/live() are always available;
+# the feature only adds the UI that turns them.
+tweak = ["dep:egui", "dep:egui-winit"]
+
+[dev-dependencies]
+# The workshop always has the panel: this self-dependency turns `tweak` on
+# for examples and tests only. The lib itself — and anyone depending on it —
+# stays egui-free; dev-dependencies never leak downstream.
+vybe = { path = ".", features = ["tweak"] }
