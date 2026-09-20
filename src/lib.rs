@@ -18,6 +18,7 @@
 //!   shorter screen edge spanning `-0.5..+0.5` (TouchDesigner-style). Pixels
 //!   never reach a sketch.
 
+pub mod clip;
 mod gpu;
 pub mod input;
 mod media;

@@ -1,0 +1,14 @@
+[package]
+name = "vybe-video"
+version = "0.0.2"
+edition = "2024"
+rust-version = "1.85"
+description = "vybe's video decoder: GStreamer behind the core's Clip seam — picture to a texture, sound to the speakers, the two kept in sync by GStreamer itself."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sulram/vybe"
+publish = false
+
+[dependencies]
+vybe = { path = "../.." }
+gstreamer = "0.25"
+gstreamer-app = "0.25"

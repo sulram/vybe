@@ -1,5 +1,5 @@
 //! The [`Player`] performs a [`Patch`]: every frame it reads the inputs, moves
-//! its objects (gates, ramps, the scene fader, the clips' playheads), and
+//! its objects (gates, ramps, the scene fader, the sequences' playheads), and
 //! describes the picture as a `Recipe` with this frame's numbers filled in.
 //!
 //! It holds all the *behaviour* and none of the pixels. The recipe it emits is
@@ -10,6 +10,7 @@
 use std::collections::{HashMap, HashSet};
 use std::f32::consts::TAU;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use super::vocabulary::{self, EffectKind, Family, ModKind, SourceKind};
@@ -17,9 +18,10 @@ use super::{
     Body, Comp, Expr, Item, Patch, Scalar, Severity, Source, Term, What, check, parse,
     resolve_frames,
 };
+use crate::clip::{Clip, Decoder, Pace, Slot};
 use crate::input::{Inputs, Value};
 use crate::objects::{Fader, Gate, Ramp, smooth};
-use crate::recipe::{CompositeLayer, Fit, Image, Recipe, Stroke};
+use crate::recipe::{CompositeLayer, Fit, Image, Recipe, Stream, Stroke};
 use crate::shell::{self, Perform};
 use crate::stage::Stage;
 use crate::sugar::{Blend, Hue, Swirl};
@@ -44,10 +46,14 @@ pub struct Player {
     symbols: HashMap<String, String>,
     /// The Scalars that went from closed to open this frame.
     rose: HashSet<String>,
-    clips: HashMap<String, Clip>,
+    sequences: HashMap<String, Sequence>,
     /// Pixels per scene unit — what `px` resolves against.
     unit_px: f32,
     time: f32,
+    videos: HashMap<String, Video>,
+    /// What opens a `video` — none, and videos draw nothing (`vybe check` says so).
+    decoder: Option<Rc<dyn Decoder>>,
+    pace: Pace,
     /// Where media paths resolve from — kept for [`Player::reload`].
     base: PathBuf,
     watch: Option<Watch>,
@@ -67,8 +73,27 @@ const WATCH_EVERY: f32 = 0.25;
 struct SceneDef {
     name: String,
     comp: Comp,
-    /// The play-once clips it reaches — restarted when the scene is entered.
-    restarts: Vec<String>,
+    /// Every sequence and video it reaches, through its sources and its wires.
+    reaches: Vec<String>,
+}
+
+/// A `video` source: the behaviour around a playing [`Clip`]. The clip keeps
+/// its own picture and sound in sync; this decides *when* it plays and how loud.
+struct Video {
+    path: PathBuf,
+    source: Source,
+    looping: bool,
+    /// Opened on the first frame. `None` after a failed open, too: a video that
+    /// won't play is a node that draws nothing, not a show that stops.
+    clip: Option<Box<dyn Clip>>,
+    tried: bool,
+    /// Where its newest frame waits for the GPU.
+    slot: Arc<Slot>,
+    /// Seconds since it (re)started.
+    playhead: f32,
+    playing: bool,
+    volume: f32,
+    done: bool,
 }
 
 enum State {
@@ -77,7 +102,7 @@ enum State {
 }
 
 /// A `frames` source's timeline.
-struct Clip {
+struct Sequence {
     frames: Arc<[PathBuf]>,
     fps: f32,
     looping: bool,
@@ -85,7 +110,7 @@ struct Clip {
     playhead: f32,
 }
 
-impl Clip {
+impl Sequence {
     fn duration(&self) -> f32 {
         self.frames.len() as f32 / self.fps
     }
@@ -152,16 +177,34 @@ impl Player {
             }
         }
 
-        let mut clips = HashMap::new();
+        let mut sequences = HashMap::new();
+        let mut videos = HashMap::new();
         let mut collect = |owner: &str, comp: &Comp| {
             let single = comp.items.len() == 1;
             for (index, item) in comp.items.iter().enumerate() {
                 if let What::Source(source) = &item.what {
+                    if source.kind == SourceKind::Video {
+                        videos.insert(
+                            clip_key(owner, index, single),
+                            Video {
+                                path: base.join(source.text.as_deref().unwrap_or_default()),
+                                source: source.clone(),
+                                looping: source.modifier(ModKind::Loop).is_some(),
+                                clip: None,
+                                tried: false,
+                                slot: Slot::new(),
+                                playhead: 0.0,
+                                playing: false,
+                                volume: -1.0, // unset: the first frame sets it
+                                done: false,
+                            },
+                        );
+                    }
                     if source.kind == SourceKind::Frames {
                         let glob = source.text.as_deref().unwrap_or_default();
-                        clips.insert(
+                        sequences.insert(
                             clip_key(owner, index, single),
-                            Clip {
+                            Sequence {
                                 frames: resolve_frames(base, glob).into(),
                                 fps: DEFAULT_FPS,
                                 looping: source.modifier(ModKind::Loop).is_some(),
@@ -187,11 +230,10 @@ impl Player {
             .map(|(name, comp)| {
                 let mut reached = Vec::new();
                 reach(&patch, &format!("scene:{name}"), &comp, &mut reached, 0);
-                reached.retain(|key| clips.get(key).is_some_and(|clip| !clip.looping));
                 SceneDef {
                     name,
                     comp,
-                    restarts: reached,
+                    reaches: reached,
                 }
             })
             .collect();
@@ -211,9 +253,12 @@ impl Player {
             symbols: HashMap::new(),
             rose: HashSet::new(),
             scenes,
-            clips,
+            sequences,
             unit_px,
             time: 0.0,
+            videos,
+            decoder: None,
+            pace: Pace::Live,
             base: base.to_owned(),
             watch: None,
             patch,
@@ -223,6 +268,13 @@ impl Player {
     /// The output's shorter edge in pixels — what `px` is measured against.
     pub fn unit_px(mut self, pixels: f32) -> Self {
         self.unit_px = pixels.max(1.0);
+        self
+    }
+
+    /// What opens this patch's `video` sources (`vybe-video`'s GStreamer, say).
+    /// Without one, a video draws nothing.
+    pub fn decoder(mut self, decoder: impl Decoder + 'static) -> Self {
+        self.decoder = Some(Rc::new(decoder));
         self
     }
 
@@ -254,8 +306,23 @@ impl Player {
         next.states = std::mem::take(&mut self.states);
         next.values = std::mem::take(&mut self.values);
         next.symbols = std::mem::take(&mut self.symbols);
-        for (key, clip) in &mut next.clips {
-            if let Some(old) = self.clips.get(key).filter(|old| old.frames == clip.frames) {
+        next.decoder = self.decoder.clone();
+        next.pace = self.pace;
+        // A video that is still the same file keeps playing, uninterrupted.
+        for (key, video) in &mut next.videos {
+            if let Some(old) = self.videos.remove(key) {
+                if old.path == video.path && old.looping == video.looping {
+                    let source = std::mem::replace(&mut video.source, old.source.clone());
+                    *video = Video { source, ..old };
+                }
+            }
+        }
+        for (key, clip) in &mut next.sequences {
+            if let Some(old) = self
+                .sequences
+                .get(key)
+                .filter(|old| old.frames == clip.frames)
+            {
                 clip.playhead = old.playhead;
             }
         }
@@ -362,13 +429,14 @@ impl Player {
         self.poll(dt);
         self.time = time;
         self.scalars(inputs, dt);
-        for clip in self.clips.values_mut() {
+        for clip in self.sequences.values_mut() {
             if !clip.paused {
                 clip.playhead += dt;
             }
         }
         self.fader.update(dt);
         self.transitions();
+        self.videos(dt);
     }
 
     // -----------------------------------------------------------------------
@@ -467,7 +535,10 @@ impl Player {
         match term {
             Term::Rise(name) => self.rose.contains(name),
             Term::Off(name) => self.value(name) <= 0.5,
-            Term::Done(name) => self.clips.get(name).is_some_and(Clip::done),
+            Term::Done(name) => {
+                self.sequences.get(name).is_some_and(Sequence::done)
+                    || self.videos.get(name).is_some_and(|video| video.done)
+            }
             Term::Is(name, Value::Num(n)) => (self.value(name) - n).abs() < 1e-4,
             Term::Is(name, Value::Sym(symbol)) => self.symbols.get(name) == Some(symbol),
         }
@@ -501,12 +572,100 @@ impl Player {
                 Some(seconds) => self.fader.fade_to(to, seconds),
                 None => self.fader.cut(to),
             }
-            // A scene's play-once clips start over each time it is entered.
-            for key in &self.scenes[to].restarts {
-                if let Some(clip) = self.clips.get_mut(key) {
+            // What plays once starts over each time its scene is entered.
+            for key in &self.scenes[to].reaches {
+                if let Some(clip) = self.sequences.get_mut(key).filter(|c| !c.looping) {
                     clip.playhead = 0.0;
                 }
+                if let Some(video) = self.videos.get_mut(key).filter(|v| !v.looping) {
+                    video.playhead = 0.0;
+                    video.done = false;
+                    if let Some(clip) = &mut video.clip {
+                        clip.restart();
+                    }
+                }
             }
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Videos
+    // -----------------------------------------------------------------------
+
+    /// Runs the videos: each plays only while a visible scene reaches it, as
+    /// loud as that scene is visible — so a crossfade is a crossfade of sound
+    /// too — and hands its newest frame to the GPU.
+    fn videos(&mut self, dt: f32) {
+        let mut weights: HashMap<&str, f32> = HashMap::new();
+        for (scene, weight) in self.fader.visible() {
+            for key in self.scenes.get(scene).map_or(&[][..], |s| &s.reaches) {
+                let heard = weights.entry(key.as_str()).or_default();
+                *heard = heard.max(weight);
+            }
+        }
+        let weights: HashMap<String, f32> = weights
+            .into_iter()
+            .map(|(key, weight)| (key.to_owned(), weight))
+            .collect();
+
+        let keys: Vec<String> = self.videos.keys().cloned().collect();
+        for key in keys {
+            let weight = weights.get(&key).copied().unwrap_or(0.0);
+            // This frame's knobs — Scalars plug into `vol` like anywhere else.
+            let (volume, held) = {
+                let source = &self.videos[&key].source;
+                let vol = source
+                    .modifier(ModKind::Vol)
+                    .and_then(|m| m.args.first())
+                    .map_or(1.0, |v| self.eval(v));
+                let muted = source.modifier(ModKind::Mute).is_some();
+                (
+                    if muted {
+                        0.0
+                    } else {
+                        vol.clamp(0.0, 1.0) * weight
+                    },
+                    source.modifier(ModKind::Paused).is_some(),
+                )
+            };
+            let (decoder, pace) = (self.decoder.clone(), self.pace);
+            let Some(video) = self.videos.get_mut(&key) else {
+                continue;
+            };
+            if !video.tried {
+                video.tried = true;
+                if let Some(decoder) = decoder {
+                    match decoder.open(&video.path, video.looping, pace) {
+                        Ok(mut clip) => {
+                            // Opened paused and silent: it starts when seen.
+                            clip.set_paused(true);
+                            clip.set_volume(0.0);
+                            video.clip = Some(clip);
+                        }
+                        Err(e) => eprintln!("vybe: {e}"),
+                    }
+                }
+            }
+            let Some(clip) = &mut video.clip else {
+                continue;
+            };
+            let playing = weight > 0.0 && !held;
+            if playing != video.playing {
+                video.playing = playing;
+                clip.set_paused(!playing);
+            }
+            if (volume - video.volume).abs() > 1e-3 {
+                video.volume = volume;
+                clip.set_volume(volume);
+            }
+            if playing {
+                video.playhead += dt;
+            }
+            // Even held, a video shows its first frame.
+            if let Some(frame) = clip.frame(video.playhead) {
+                video.slot.put(frame);
+            }
+            video.done = clip.done();
         }
     }
 
@@ -665,19 +824,33 @@ impl Player {
         place[1] += number(ModKind::Y).unwrap_or(0.0);
         let alpha = number(ModKind::Alpha).unwrap_or(1.0).clamp(0.0, 1.0);
 
+        let fit = match source.modifier(ModKind::Fit) {
+            Some(_) => Fit::Frame,
+            None => Fit::Unit,
+        };
+        if source.kind == SourceKind::Video {
+            // Without a decoder a video draws nothing (`vybe check` says so).
+            return match self.videos.get(clip).filter(|_| self.decoder.is_some()) {
+                Some(video) => Recipe::Stream(Stream {
+                    slot: video.slot.clone(),
+                    fit,
+                    place,
+                    size: number(ModKind::Size).unwrap_or(1.0),
+                    alpha,
+                }),
+                None => Recipe::Shapes(Vec::new()),
+            };
+        }
         if vocabulary::source_word(source.kind).family != Family::Shape {
-            // `video` and `text` draw nothing yet (`vybe check` says so).
-            let Some(clip) = self.clips.get(clip).filter(|c| !c.frames.is_empty()) else {
+            // `text` draws nothing yet (`vybe check` says so).
+            let Some(clip) = self.sequences.get(clip).filter(|c| !c.frames.is_empty()) else {
                 return Recipe::Shapes(Vec::new());
             };
             let last = clip.frames.len() - 1;
             return Recipe::Image(Image {
                 frames: clip.frames.clone(),
                 index: at.map_or(clip.index(), |at| (at * last as f32).round() as usize),
-                fit: match source.modifier(ModKind::Fit) {
-                    Some(_) => Fit::Frame,
-                    None => Fit::Unit,
-                },
+                fit,
                 place,
                 size: number(ModKind::Size).unwrap_or(1.0),
                 alpha,
@@ -740,7 +913,7 @@ fn faded(mut strokes: Vec<Stroke>, alpha: f32) -> Vec<Stroke> {
     strokes
 }
 
-/// The clips `comp` reaches, through its own sources and its wires.
+/// The sequences `comp` reaches, through its own sources and its wires.
 fn reach(patch: &Patch, owner: &str, comp: &Comp, out: &mut Vec<String>, depth: usize) {
     let single = comp.items.len() == 1;
     for (index, item) in comp.items.iter().enumerate() {
@@ -762,8 +935,12 @@ impl Perform for Player {
         self.describe()
     }
 
+    fn offline(&mut self) {
+        self.pace = Pace::Offline;
+    }
+
     fn media(&self) -> Vec<PathBuf> {
-        self.clips
+        self.sequences
             .values()
             .flat_map(|clip| clip.frames.iter().cloned())
             .collect()
@@ -877,7 +1054,7 @@ mod tests {
             run.set("/hands", "1");
             run.run(3.2);
             assert_eq!(run.player.scene(), "play");
-            assert!(run.player.clips["clip"].playhead < 0.5);
+            assert!(run.player.sequences["clip"].playhead < 0.5);
             run.set("/hands", "0");
             run.run(3.0);
             assert_eq!(run.player.scene(), "idle");
@@ -917,7 +1094,7 @@ mod tests {
         run.run(1.5);
         assert_eq!(run.player.scene(), "touch");
         let t = run.player.value("t");
-        let playhead = run.player.clips["clip"].playhead;
+        let playhead = run.player.sequences["clip"].playhead;
 
         // Retime the ramp, recolour a node, add a scene: a live edit.
         let edited = FACE
@@ -929,7 +1106,7 @@ mod tests {
         // Same scene, same ramp value, same playhead — nothing restarted…
         assert_eq!(run.player.scene(), "touch");
         assert_eq!(run.player.value("t"), t);
-        assert_eq!(run.player.clips["clip"].playhead, playhead);
+        assert_eq!(run.player.sequences["clip"].playhead, playhead);
         // …and the new timing is live. From t ≈ .47 the ramp needs ≈ .92 s at
         // the new `up 1.75s`; at the old 3 s it would need 1.58 s.
         run.run(1.0);
@@ -1008,6 +1185,99 @@ mod tests {
         run.run(0.5);
         assert_eq!(run.player.scene(), "b"); // the last good patch plays on
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A clip that decodes nothing and remembers everything it was told.
+    #[derive(Default)]
+    struct Told {
+        paused: bool,
+        volume: f32,
+        restarts: u32,
+        /// Seconds of "file" left before it reports `done`.
+        ends_after: f32,
+        asked_until: f32,
+    }
+
+    struct FakeClip(Rc<std::cell::RefCell<Told>>);
+
+    impl Clip for FakeClip {
+        fn restart(&mut self) {
+            let mut told = self.0.borrow_mut();
+            told.restarts += 1;
+            told.asked_until = 0.0;
+        }
+        fn set_paused(&mut self, paused: bool) {
+            self.0.borrow_mut().paused = paused;
+        }
+        fn set_volume(&mut self, volume: f32) {
+            self.0.borrow_mut().volume = volume;
+        }
+        fn done(&mut self) -> bool {
+            let told = self.0.borrow();
+            told.asked_until >= told.ends_after
+        }
+        fn frame(&mut self, time: f32) -> Option<crate::clip::Frame> {
+            self.0.borrow_mut().asked_until = time;
+            None
+        }
+    }
+
+    struct FakeDecoder(Rc<std::cell::RefCell<Told>>);
+
+    impl Decoder for FakeDecoder {
+        fn open(&self, _: &Path, _: bool, _: Pace) -> Result<Box<dyn Clip>, String> {
+            Ok(Box::new(FakeClip(self.0.clone())))
+        }
+    }
+
+    #[test]
+    fn a_video_plays_only_while_seen_as_loud_as_its_scene_and_ends_it() {
+        let text = "go   = osc /go\n\
+                    dot  = circle .1\n\
+                    film = video film.mp4 vol .8\n\
+                    idle : dot\n\
+                    play : film\n\
+                    idle -> play  go rise    fade 1s\n\
+                    play -> idle  film done  fade 1s";
+        let told = Rc::new(std::cell::RefCell::new(Told {
+            ends_after: 3.0,
+            ..Told::default()
+        }));
+        let mut run = Run::new(text, Path::new("."));
+        run.player = run.player.decoder(FakeDecoder(told.clone()));
+
+        // Unseen: opened, but held and silent.
+        run.run(0.5);
+        assert!(told.borrow().paused);
+        assert_eq!(told.borrow().volume, 0.0);
+
+        // Its scene fades in: it starts from the top, and its sound fades in too.
+        run.set("/go", "1");
+        run.run(0.5);
+        assert_eq!(run.player.scene(), "play");
+        assert_eq!(told.borrow().restarts, 1);
+        assert!(!told.borrow().paused);
+        let halfway = told.borrow().volume;
+        assert!(halfway > 0.2 && halfway < 0.6, "{halfway}"); // ≈ .8 × ½
+        run.run(1.0);
+        assert!((told.borrow().volume - 0.8).abs() < 1e-3);
+
+        // It plays out: `film done` takes the face home, and the sound with it.
+        run.run(2.0);
+        assert_eq!(run.player.scene(), "idle");
+        run.run(1.2);
+        assert!(told.borrow().paused);
+        assert!(told.borrow().volume < 1e-3);
+    }
+
+    #[test]
+    fn a_video_without_a_decoder_draws_nothing_and_breaks_nothing() {
+        let mut run = Run::new("film = video film.mp4", Path::new("."));
+        run.run(0.2);
+        let Recipe::Composite(scenes) = run.player.describe() else {
+            panic!("scenes composite");
+        };
+        assert_eq!(scenes.len(), 1);
     }
 
     #[test]

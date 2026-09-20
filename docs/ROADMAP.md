@@ -82,9 +82,16 @@ of the 0.0.2 design brief. Acceptance: `vybe render map-show.vy --osc
 
 - [ ] `vybe-stage-drm`: KMS/GBM shell, no window (`out kms` stops falling back).
       Spike wgpu-on-KMS in `examples/` first — the brief's risk #1.
-- [ ] `vybe-video`: GStreamer HEVC (`v4l2h265dec`), DMA-BUF import behind a
-      feature, NV12 CPU-copy fallback. `video` stops being a checker error.
-- [ ] `vybe-audio` (`mute`, `vol`, a transition's sound), `vybe-io` GPIO.
+- [x] `vybe-video`, pulled forward into 0.0.2 by a real clip: `video` plays
+      **with its sound** through GStreamer behind the `Clip`/`Decoder` seam —
+      hardware decode, sync kept by GStreamer, volume following the scene's
+      fade, one texture per clip, deterministic headless. DECISIONS 2026-09-20.
+- [ ] On the Pi: verify `v4l2h265dec` is picked; DMA-BUF import behind a feature
+      (zero-copy), NV12 CPU-copy as the fallback it is today.
+- [ ] Choose the audio device per video (a USB DAC per face → a directional
+      speaker); a transition's one-shot sound (`… cut confirma.wav`).
+- [ ] Scrub a video with `@` (seek on a paused pipeline) if a work pulls it.
+- [ ] `vybe-io` GPIO.
 - [ ] mDNS `_vybe._tcp` discovery; the remote cycles faces (Alt ↑↓); MJPEG preview.
 - [ ] ASTC cache for `frames()` (~1 MB/frame instead of 9).
 - [ ] Half-resolution feedback as an option (fill rate on VideoCore VII).
@@ -271,6 +278,7 @@ Patches (`examples/patches/<name>/`), 0.0.2:
 - [x] `hello` — the smallest patch. `trails` — `|` into `feedback` (twin of the
       `feedback` sketch, pixel for pixel). `stack` — `+ * add` and Scalars.
 - [x] `scenes` — scenes, transitions, a key as a gate.
+- [x] `map-show` plays a real video with sound (the file stays local, git-ignored).
 - [x] `map-cube` / `map-screen` — one calibration tool, two shapes: a cube's
       square face and a 16:9 screen, each a `picture` inside a 16:10 output;
       test patterns as scenes; the faces the remote talks to.

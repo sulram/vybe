@@ -27,6 +27,8 @@ pub(crate) enum Recipe {
     Points { count: u32, forces: Vec<Force> },
     /// One frame of an image sequence, placed in scene space.
     Image(Image),
+    /// A playing clip (video): whatever frame its slot holds, placed like an image.
+    Stream(Stream),
     /// A stack of worlds composited into one frame, bottom to top. Each
     /// [`CompositeLayer`] is its own sub-recipe rendered to its own signal
     /// texture, plus how it lands on the worlds beneath it. The seam
@@ -58,6 +60,20 @@ pub(crate) struct CompositeLayer {
 pub(crate) struct Image {
     pub frames: Arc<[PathBuf]>,
     pub index: usize,
+    pub fit: Fit,
+    /// Center, scene space.
+    pub place: [f32; 2],
+    /// Multiplies the fitted size.
+    pub size: f32,
+    pub alpha: f32,
+}
+
+/// A playing clip's picture. The `slot` is shared (`Arc`) with whoever decodes:
+/// the same slot across re-descriptions is the same node, so the core keeps the
+/// clip's texture and only uploads when a new frame arrives.
+#[derive(Clone)]
+pub(crate) struct Stream {
+    pub slot: Arc<crate::clip::Slot>,
     pub fit: Fit,
     /// Center, scene space.
     pub place: [f32; 2],
@@ -106,6 +122,7 @@ impl Recipe {
             Recipe::Feedback { .. } => "vybe — feedback",
             Recipe::Points { .. } => "vybe — particles",
             Recipe::Image(_) => "vybe — image",
+            Recipe::Stream(_) => "vybe — video",
             Recipe::Composite(_) => "vybe — layers",
             Recipe::Named(_, inner) => inner.title(),
         }

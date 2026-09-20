@@ -12,12 +12,27 @@ use super::{
     did_you_mean, resolve_frames,
 };
 
+/// What the program doing the checking can actually play — so the checker
+/// calls an error only what *will* fail here.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Support {
+    /// A video decoder is linked and started (`vybe-video`).
+    pub video: bool,
+}
+
+/// Reads `patch` for mistakes, for a program with no optional support at all.
+/// See [`check_with`].
+pub fn check(patch: &Patch, base: &Path) -> Vec<Diagnostic> {
+    check_with(patch, base, Support::default())
+}
+
 /// Reads `patch` for mistakes. Media paths resolve against `base` (the patch's
 /// own folder). Sorted by line; [`Severity::Error`] means it will not run.
-pub fn check(patch: &Patch, base: &Path) -> Vec<Diagnostic> {
+pub fn check_with(patch: &Patch, base: &Path, support: Support) -> Vec<Diagnostic> {
     let mut checker = Checker {
         patch,
         base,
+        support,
         found: Vec::new(),
     };
     checker.names();
@@ -49,6 +64,7 @@ enum Kind {
 struct Checker<'a> {
     patch: &'a Patch,
     base: &'a Path,
+    support: Support,
     found: Vec<Diagnostic>,
 }
 
@@ -221,6 +237,15 @@ impl Checker<'_> {
         }
         if let Some(at) = &item.at {
             self.number(at, line);
+            let scrubs_a_video = self
+                .timeline(&item.what)
+                .is_some_and(|source| source.kind == SourceKind::Video);
+            if scrubs_a_video {
+                self.found.push(
+                    Diagnostic::error(line, "`@` can't scrub a video yet — a video plays on its own clock, with its sound")
+                        .help("scrub a PNG sequence instead:  trans = frames trans/*.png   …   trans@smooth(t)"),
+                );
+            }
             if self.timeline(&item.what).is_none() {
                 self.found.push(
                     Diagnostic::error(line, "`@` positions something in time, but this has no timeline")
@@ -261,7 +286,8 @@ impl Checker<'_> {
             for arg in &modifier.args {
                 self.number(arg, line);
             }
-            if matches!(modifier.kind, ModKind::Mute | ModKind::Vol) {
+            let sounds = source.kind == SourceKind::Video && self.support.video;
+            if matches!(modifier.kind, ModKind::Mute | ModKind::Vol) && !sounds {
                 self.found.push(Diagnostic::note(
                     line,
                     "audio arrives with vybe-audio; `mute`/`vol` are read and ignored for now",
@@ -283,14 +309,29 @@ impl Checker<'_> {
                     );
                 }
             }
+            SourceKind::Video if self.support.video => {
+                if !self.base.join(text).is_file() {
+                    self.found.push(
+                        Diagnostic::error(
+                            line,
+                            format!(
+                                "no such video: `{text}` (looked in {})",
+                                self.base.display()
+                            ),
+                        )
+                        .help("the path is relative to the patch's own folder"),
+                    );
+                }
+            }
             SourceKind::Video => {
-                let stem = Path::new(text).with_extension("");
-                let stem = stem.display();
                 self.found.push(
-                    Diagnostic::error(line, format!("`video {text}`: video decoding arrives with vybe-video (0.0.3)"))
-                        .help(format!(
-                            "until then a PNG sequence plays the same way:\n    ffmpeg -i {text} -vf fps=30 {stem}/%04d.png\n    ... = frames {stem}/*.png loop"
-                        )),
+                    Diagnostic::error(
+                        line,
+                        format!("`video {text}`: this build can't decode video"),
+                    )
+                    .help(
+                        "the `vybe` command plays video through GStreamer:\n    macOS: brew install gstreamer\n    Debian / Raspberry Pi OS: apt install gstreamer1.0-plugins-base gstreamer1.0-plugins-good gstreamer1.0-libav",
+                    ),
                 );
             }
             SourceKind::Text => self.found.push(
@@ -492,9 +533,39 @@ mod tests {
     }
 
     #[test]
-    fn video_teaches_the_ffmpeg_line() {
+    fn video_without_a_decoder_says_how_to_get_one() {
         let e = errors("v = video agua.mp4 loop");
-        assert!(e[0].help.as_ref().unwrap().contains("ffmpeg -i agua.mp4"));
+        assert!(
+            e[0].help
+                .as_ref()
+                .unwrap()
+                .contains("brew install gstreamer")
+        );
+    }
+
+    #[test]
+    fn video_with_a_decoder_only_needs_its_file() {
+        let patch = parse("v = video nowhere.mp4 loop vol .5").expect("parses");
+        let found = check_with(&patch, Path::new("."), Support { video: true });
+        let errors: Vec<_> = found
+            .iter()
+            .filter(|d| d.severity == Severity::Error)
+            .collect();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].message.contains("no such video"));
+        // …and `vol` is no longer a note: it works.
+        assert!(!found.iter().any(|d| d.message.contains("vybe-audio")));
+    }
+
+    #[test]
+    fn a_video_cannot_be_scrubbed() {
+        let patch = parse("t = osc /t\nv = video a.mp4\nw = v@t").expect("parses");
+        let found = check_with(&patch, Path::new("."), Support { video: true });
+        assert!(
+            found
+                .iter()
+                .any(|d| d.message.contains("can't scrub a video"))
+        );
     }
 
     #[test]

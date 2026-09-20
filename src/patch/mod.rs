@@ -29,7 +29,7 @@ pub mod vocabulary;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-pub use check::{check, has_errors};
+pub use check::{Support, check, check_with, has_errors};
 pub use parse::parse;
 pub use play::Player;
 pub use vocabulary::{EffectKind, ModKind, SourceKind};

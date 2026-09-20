@@ -29,7 +29,7 @@ use bytemuck::Zeroable;
 use winit::window::Window;
 
 use crate::media::{self, Pixels};
-use crate::recipe::{Fit, Force, Form, Image, Recipe, Stroke};
+use crate::recipe::{Fit, Force, Form, Image, Recipe, Stream, Stroke};
 use crate::stage::Warp;
 use crate::sugar::{Blend, Osc, Swirl};
 
@@ -455,6 +455,7 @@ enum Desc {
     Feedback { source: Vec<Stroke>, swirl: Swirl },
     Points { count: u32, forces: Vec<Force> },
     Image(Image),
+    Stream(Stream),
     Mix(Vec<MixDesc>),
 }
 
@@ -492,6 +493,7 @@ fn flatten(recipe: Recipe, key: String, out: &mut Vec<(String, Desc)>) -> usize 
         Recipe::Feedback { source, swirl } => Desc::Feedback { source, swirl },
         Recipe::Points { count, forces } => Desc::Points { count, forces },
         Recipe::Image(image) => Desc::Image(image),
+        Recipe::Stream(stream) => Desc::Stream(stream),
     };
     out.push((key, desc));
     out.len() - 1
@@ -533,6 +535,17 @@ enum Kind {
         uniforms: wgpu::Buffer,
         target: wgpu::TextureView,
     },
+    /// A playing clip: one texture, refilled whenever its slot holds a new
+    /// frame, drawn as a textured quad. However long the clip, this is all the
+    /// memory it takes.
+    Stream {
+        stream: Stream,
+        /// The clip's texture and the bind group sampling it — made when the
+        /// first frame arrives, remade only if the frame size changes.
+        picture: Option<StreamPicture>,
+        uniforms: wgpu::Buffer,
+        target: wgpu::TextureView,
+    },
     /// A stack: samples earlier nodes, bottom to top, each by its blend and
     /// opacity — feedback on one layer, still geometry on another, no smearing
     /// across them.
@@ -540,6 +553,12 @@ enum Kind {
         inputs: Vec<MixInput>,
         target: wgpu::TextureView,
     },
+}
+
+struct StreamPicture {
+    texture: wgpu::Texture,
+    size: [u32; 2],
+    bg: wgpu::BindGroup,
 }
 
 struct MixInput {
@@ -589,6 +608,7 @@ impl Node {
             Kind::Shapes { target, .. }
             | Kind::Points { target, .. }
             | Kind::Image { target, .. }
+            | Kind::Stream { target, .. }
             | Kind::Mix { target, .. } => std::slice::from_ref(target),
             Kind::Feedback { targets, .. } => &targets.ping_pong.views,
         }
@@ -612,6 +632,10 @@ impl Node {
             // Another sequence is another set of textures.
             (Kind::Image { image, .. }, Desc::Image(next)) => {
                 Arc::ptr_eq(&image.frames, &next.frames) || image.frames == next.frames
+            }
+            // Another slot is another clip.
+            (Kind::Stream { stream, .. }, Desc::Stream(next)) => {
+                Arc::ptr_eq(&stream.slot, &next.slot)
             }
             _ => false,
         }
@@ -784,6 +808,7 @@ impl Engine {
                 );
             }
             (Kind::Image { image, .. }, Desc::Image(next)) => *image = next,
+            (Kind::Stream { stream, .. }, Desc::Stream(next)) => *stream = next,
             (Kind::Mix { inputs, .. }, Desc::Mix(descs)) => {
                 if inputs.len() == descs.len() {
                     for (input, desc) in inputs.iter_mut().zip(descs) {
@@ -859,6 +884,17 @@ impl Engine {
                     target: make_signal_texture(&self.device, w, h, "image target"),
                 }
             }
+            Desc::Stream(stream) => Kind::Stream {
+                stream,
+                picture: None,
+                uniforms: uniform_buffer(
+                    &self.device,
+                    &self.queue,
+                    "stream quad",
+                    &QuadUniforms::zeroed(),
+                ),
+                target: make_signal_texture(&self.device, w, h, "stream target"),
+            },
             Desc::Mix(descs) => Kind::Mix {
                 inputs: self.mix_inputs(descs),
                 target: make_signal_texture(&self.device, w, h, "mix target"),
@@ -905,36 +941,12 @@ impl Engine {
                 rgba: vec![0; 4],
             }
         });
-        let size = wgpu::Extent3d {
-            width: pixels.width,
-            height: pixels.height,
-            depth_or_array_layers: 1,
-        };
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("image"),
-            size,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            // sRGB in the file, linear in the signal world: the sampler decodes.
-            format: wgpu::TextureFormat::Rgba8UnormSrgb,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
+        let texture = upload_rgba(
+            &self.device,
+            &self.queue,
+            None,
+            [pixels.width, pixels.height],
             &pixels.rgba,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(4 * pixels.width),
-                rows_per_image: Some(pixels.height),
-            },
-            size,
         );
         let tex = Rc::new(ImageTex {
             view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
@@ -954,6 +966,7 @@ impl Engine {
                 Kind::Shapes { target, .. } => *target = fresh("shapes target"),
                 Kind::Points { target, .. } => *target = fresh("points target"),
                 Kind::Image { target, .. } => *target = fresh("image target"),
+                Kind::Stream { target, .. } => *target = fresh("stream target"),
                 Kind::Mix { target, .. } => *target = fresh("mix target"),
                 Kind::Feedback {
                     swirl_uniforms,
@@ -1049,11 +1062,68 @@ impl Engine {
                     // An empty sequence draws nothing (Principle 2).
                     if !bgs.is_empty() {
                         let index = image.index.min(bgs.len() - 1);
-                        let quad = fit_quad(image, sizes[index], frame_size);
+                        let quad = fit_quad(
+                            (image.fit, image.place, image.size, image.alpha),
+                            sizes[index],
+                            frame_size,
+                        );
                         queue.write_buffer(uniforms, 0, bytemuck::bytes_of(&quad));
                         pass.set_pipeline(&kit.image_pipeline);
                         pass.set_bind_group(0, frame_bg, &[]);
                         pass.set_bind_group(1, &bgs[index], &[]);
+                        pass.draw(0..6, 0..1);
+                    }
+                }
+                Kind::Stream {
+                    stream,
+                    picture,
+                    uniforms,
+                    target,
+                } => {
+                    // A new frame? Refill the clip's texture (remaking it only
+                    // if the frame changed size).
+                    if let Some(frame) = stream.slot.take() {
+                        let size = [frame.width.max(1), frame.height.max(1)];
+                        let fits = frame.rgba.len() == 4 * size[0] as usize * size[1] as usize;
+                        let reuse = picture.take().filter(|p| p.size == size);
+                        if fits {
+                            let texture = upload_rgba(
+                                device,
+                                queue,
+                                reuse.as_ref().map(|p| &p.texture),
+                                size,
+                                &frame.rgba,
+                            );
+                            *picture = Some(match reuse {
+                                Some(kept) => kept,
+                                None => StreamPicture {
+                                    bg: sampled_bind_group(
+                                        device,
+                                        &kit.sampled_layout,
+                                        &texture.create_view(&Default::default()),
+                                        &kit.sampler,
+                                        uniforms,
+                                    ),
+                                    texture,
+                                    size,
+                                },
+                            });
+                        } else {
+                            *picture = reuse;
+                        }
+                    }
+                    let mut pass = begin_pass(encoder, target, "stream pass", clear);
+                    // Until its first frame arrives a clip draws nothing.
+                    if let Some(picture) = picture {
+                        let quad = fit_quad(
+                            (stream.fit, stream.place, stream.size, stream.alpha),
+                            picture.size,
+                            frame_size,
+                        );
+                        queue.write_buffer(uniforms, 0, bytemuck::bytes_of(&quad));
+                        pass.set_pipeline(&kit.image_pipeline);
+                        pass.set_bind_group(0, frame_bg, &[]);
+                        pass.set_bind_group(1, &picture.bg, &[]);
                         pass.draw(0..6, 0..1);
                     }
                 }
@@ -1082,21 +1152,70 @@ impl Engine {
     }
 }
 
-/// An image's quad: contained in its [`Fit`] box, scaled, placed.
-fn fit_quad(image: &Image, size: [u32; 2], frame: [f32; 2]) -> QuadUniforms {
+/// A picture's quad — `(fit, place, scale, alpha)` — contained in its [`Fit`]
+/// box, scaled, placed. Shared by stills and clips.
+fn fit_quad(
+    (fit, place, scale, alpha): (Fit, [f32; 2], f32, f32),
+    size: [u32; 2],
+    frame: [f32; 2],
+) -> QuadUniforms {
     let unit = frame[0].min(frame[1]);
-    let bounds = match image.fit {
+    let bounds = match fit {
         Fit::Unit => [1.0, 1.0],
         Fit::Frame => [frame[0] / unit, frame[1] / unit],
     };
     let (w, h) = (size[0].max(1) as f32, size[1].max(1) as f32);
-    let scale = (bounds[0] / w).min(bounds[1] / h) * image.size * 0.5;
+    let scale = (bounds[0] / w).min(bounds[1] / h) * scale * 0.5;
     QuadUniforms {
-        center: image.place,
+        center: place,
         half: [w * scale, h * scale],
-        alpha: image.alpha,
+        alpha,
         _pad: [0.0; 3],
     }
+}
+
+/// Puts RGBA8 pixels (sRGB in the file, linear in the signal world: the sampler
+/// decodes) into `into` — or into a new texture when there is none to refill.
+fn upload_rgba(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    into: Option<&wgpu::Texture>,
+    [width, height]: [u32; 2],
+    rgba: &[u8],
+) -> wgpu::Texture {
+    let size = wgpu::Extent3d {
+        width,
+        height,
+        depth_or_array_layers: 1,
+    };
+    let texture = into.cloned().unwrap_or_else(|| {
+        device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("picture"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        })
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        rgba,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(4 * width),
+            rows_per_image: Some(height),
+        },
+        size,
+    );
+    texture
 }
 
 // ---------------------------------------------------------------------------

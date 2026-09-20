@@ -109,12 +109,23 @@ fn main() -> ExitCode {
     }
 }
 
+/// The video decoder this build carries, if it carries one and it starts.
+#[cfg(feature = "video")]
+fn decoder() -> Option<vybe_video::GStreamer> {
+    vybe_video::GStreamer::new()
+        .map_err(|e| eprintln!("vybe: {e}"))
+        .ok()
+}
+
 /// Parses and checks a patch, printing every finding. `Err` when it won't run.
 fn load(path: &Path) -> Result<Patch, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let support = patch::Support {
+        video: cfg!(feature = "video"),
+    };
     let (patch, found) = match patch::parse(&text) {
         Ok(patch) => {
-            let found = patch::check(&patch, base_of(path));
+            let found = patch::check_with(&patch, base_of(path), support);
             (Some(patch), found)
         }
         Err(errors) => (None, errors),
@@ -147,9 +158,15 @@ fn stage(path: &Path, patch: Patch, listen: bool) -> Result<Stage, String> {
     let base = base_of(path);
     let out = patch.out.clone();
     // A window follows the file as it is edited; a render is one fixed take.
+    let player = Player::new(patch, base);
+    #[cfg(feature = "video")]
+    let player = match decoder() {
+        Some(decoder) => player.decoder(decoder),
+        None => player,
+    };
     let player = match listen {
-        true => Player::new(patch, base).watch(path),
-        false => Player::new(patch, base),
+        true => player.watch(path),
+        false => player,
     };
     let mut stage = player.stage().title(&format!(
         "vybe — {}",

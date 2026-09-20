@@ -948,3 +948,58 @@ Three choices worth keeping:
 Polling the file's mtime four times a second, from the player itself: std-only,
 no watcher dependency, no thread. Headless renders never watch — a render is one
 fixed take. A changed `out` line (size, port) says "restart to apply".
+
+---
+
+## 2026-09-20 — Video, with its sound: a player behind a seam, not a decoder
+
+A real clip arrived (1080p, 2 min 18 s, stereo) and settled two things at once.
+`frames` keeps every frame as a GPU texture — fine for a 4-second transition
+that gets *scrubbed*, absurd for 4,100 frames (~33 GB). And the requirement was
+said plainly: **video with sound, not just frames.**
+
+**The seam: `Clip` and `Decoder`** (`src/clip.rs`, std-only). A clip is something
+that *plays*: restart, pause, volume, `done`, and "a frame, if there is a new
+one". The division of labour is the point: the **player** owns a clip's
+*behaviour* (when it restarts, how loud, whether a transition may fire on
+`done`); the **GPU** owns one texture per clip, refilled when a frame arrives —
+so a clip costs the same memory whatever its length; and the clip owns decoding
+and **its own audio/video sync**. The engine never paces sound. Frames cross in
+a `Slot` shared by `Arc`, which is key = identity again: the same slot across
+re-descriptions is the same GPU node.
+
+**GStreamer, not ffmpeg.** The first instinct was an ffmpeg subprocess piping raw
+frames. It is the wrong shape of tool: ffmpeg *decodes*; it hands you frames and
+samples and leaves you to build the player — A/V sync, an audio device, looping,
+seeking, volume. With sound in scope that is reinventing a media player, and the
+hard part (sync) is exactly the part we would own. GStreamer *is* a player:
+`playbin` decodes (in hardware where there is any — VideoToolbox here, V4L2 HEVC
+on a Pi 5), keeps picture and sound in sync on its own clock, and drives the
+speakers. `vybe-video` is the glue: an `appsink` at the end of the pipeline,
+RGBA out. And it is the *same* backend on the laptop and on the wall — the
+brief's choice for the Pi — with a zero-copy path (DMA-BUF) open later that a
+subprocess could never have. Considered and set aside: linked libav
+(`ffmpeg-next`, `video-rs`: decode only, and a build welded to a libav version),
+`libmpv` (a fine player whose render API wants OpenGL, not wgpu), pure Rust
+(`symphonia` + `openh264`: no system dependency, but our sync, H.264 only, no
+hardware decode — and the Pi needs HEVC), `gpu-video` (hardware decode straight
+to wgpu, elegant, but Vulkan-only). The cost — a system library — is contained:
+it is one crate, and `vybe-cli --no-default-features` builds without it.
+
+**Two paces.** *Live*: the pipeline runs on its clock, with sound; the engine
+takes whatever frame is newest, and late frames are dropped, never queued — the
+picture is always *now*. *Offline* (headless): no clock, no sound; frames are
+pulled in order and the one that belongs at exactly the asked time is returned,
+so `vybe render` stays "same input, same pixels" even with video.
+
+**A video is as loud as its scene is visible.** The brief asked that audio weight
+follow visual weight. It fell out of the `Fader` for free: a video's volume is
+`vol` × the weight of the most visible scene that reaches it. A crossfade is a
+crossfade of sound; a video no scene shows is paused and silent, and a
+play-once video restarts when its scene is entered — the same rule `frames`
+already followed. `vol` and `mute` stopped being notes and became words that work.
+
+**The checker asks what *this* program can play** (`check_with(.., Support)`).
+With a decoder, `video` needs only its file. Without one, the error says how to
+install GStreamer. `@` on a video is refused for now: a video plays on its own
+clock with its sound; scrubbing is what `frames` is for.

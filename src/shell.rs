@@ -32,6 +32,9 @@ pub(crate) enum Source {
 /// whatever state that takes (ramps, gates, which scene is showing).
 pub(crate) trait Perform {
     fn frame(&mut self, inputs: &Inputs, time: f32, dt: f32) -> Recipe;
+    /// This run is headless: no clock of its own, no sound, and whatever plays
+    /// must give the frame that belongs at exactly the asked time.
+    fn offline(&mut self) {}
     /// The image files it will show — loaded before the first frame.
     fn media(&self) -> Vec<PathBuf>;
 }

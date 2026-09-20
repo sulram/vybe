@@ -48,6 +48,14 @@ vybe api                                              # the whole vocabulary, fo
 Headless rendering is deterministic — fixed clock, scripted inputs, same pixels
 every time — so a patch and its Rust twin are compared pixel for pixel.
 
+**Video, with its sound.** `main = video clip.mov fit vol .8` plays a file through
+GStreamer — hardware decode, picture and sound kept in sync by GStreamer itself,
+the volume following the scene's fade. It needs GStreamer installed
+(`brew install gstreamer`; on Debian / Raspberry Pi OS the `gstreamer1.0-*`
+packages); without it, `cargo build -p vybe-cli --no-default-features` builds a
+`vybe` that runs every patch that has no `video`. `cargo run -p vybe-video
+--example probe -- clip.mov` tells you whether a file will play.
+
 **Syntax highlighting** for `.vy` in VS Code (and anything that reads TextMate
 grammars): `ln -s "$PWD/editors/vscode" ~/.vscode/extensions/vybe-vy`, then
 reload the window. The grammar is generated from the engine's own vocabulary
@@ -163,7 +171,8 @@ integrations enter through) · `stage` (clock, keystone, headless) · `gpu` (all
 wgpu, hidden) · `shell` (window) · `tweak` (the optional egui panel).
 
 Around it, a workspace of crates **cut by dependency, not by platform**:
-`vybe-cli` (the `vybe` command) · `vybe-io` (OSC) · `vybe-remote` (the remote
+`vybe-cli` (the `vybe` command) · `vybe-video` (video with sound, through
+GStreamer) · `vybe-io` (OSC) · `vybe-remote` (the remote
 protocol, both ends, and the remote itself) · `keystone` (a projector's
 calibration as a file; depends on nothing).
 

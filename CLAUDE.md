@@ -71,12 +71,15 @@ settled decisions in [DECISIONS.md](docs/DECISIONS.md); what we intend to build 
   - `src/gpu.rs` — all of wgpu: a keyed node list + one present/warp pass.
   - `src/shell.rs` — the winit window; events → the core's own `Event`.
   - `src/media.rs` — PNG in/out (the core's only file format).
+  - `src/clip.rs` — `Clip` + `Decoder`: THE seam moving pictures enter through.
   - `src/tweak.rs` — the panel Overlay (feature `tweak`; egui, renderer ours).
   - `src/shaders/*.wgsl` — WGSL, embedded via `include_str!`.
   - `examples/*.rs` — THE SKETCHES. `examples/patches/<name>/` — THE PATCHES.
   - `editors/vscode/` — `.vy` highlighting; its grammar is GENERATED, never edited.
 - Workspace — crates cut **by dependency, not by platform**:
   - `crates/vybe-cli` (`vybe run|render|check|api`; clap)
+  - `crates/vybe-video` (video WITH SOUND via GStreamer — a system library:
+    `brew install gstreamer`; `vybe-cli --no-default-features` builds without it)
   - `crates/vybe-io` (OSC over UDP; rosc) · `crates/keystone` (the calibration
     file; depends on nothing) · `crates/vybe-remote` (the OSC protocol, both
     ends, + the remote sketch)
@@ -106,6 +109,8 @@ settled decisions in [DECISIONS.md](docs/DECISIONS.md); what we intend to build 
   scripts, a `scenes().edge()` DSL, ternaries in the grammar, mesh warp, HAP.
 - Pi-specific code: nothing is Pi-specific; `vybe-stage-drm` will run on any KMS.
 - Generic material/effect systems; blend modes beyond `over`/`add`.
+- Our own A/V sync or audio pacing: a `Clip` keeps its own (GStreamer does it).
+  The engine never paces sound.
 - UI in the core or default build — the feature-gated `tweak` panel is the
   one sanctioned exception. If the remote ever needs real widgets, wrap egui
   behind the `tweak` seam; do not grow the engine into a toolkit.

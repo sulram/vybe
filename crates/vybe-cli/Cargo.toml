@@ -16,4 +16,12 @@ path = "src/main.rs"
 vybe = { path = "../.." }
 vybe-remote = { path = "../vybe-remote" }
 keystone = { path = "../keystone" }
+vybe-video = { path = "../vybe-video", optional = true }
 clap = { version = "4", features = ["derive"] }
+
+[features]
+# Video with sound, through GStreamer (a system library). Build without it —
+# `--no-default-features` — where GStreamer isn't installed: patches without
+# `video` run just the same, and `vybe check` says what a `video` needs.
+default = ["video"]
+video = ["dep:vybe-video"]

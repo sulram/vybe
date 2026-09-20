@@ -292,6 +292,9 @@ impl Render {
             return Ok(Vec::new());
         };
 
+        if let Source::Play(player) = &mut show.source {
+            player.offline();
+        }
         let mut gpu = Headless::new(self.width, self.height, show.picture, self.alpha);
         gpu.engine().preload(&show.media());
         let mut clock = Clock::fixed(self.fps);

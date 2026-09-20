@@ -119,7 +119,7 @@ pub const SOURCES: &[SourceWord] = &[
         args: &[],
         text: Some("file"),
         family: Family::Media,
-        doc: "a video file (arrives with vybe-video; until then use `frames`)",
+        doc: "a video file, with its sound; plays once (then `done`) or `loop`s; restarts when its scene is entered",
     },
     SourceWord {
         kind: SourceKind::Text,
@@ -254,14 +254,14 @@ pub const MODS: &[ModWord] = &[
         name: "mute",
         args: &[],
         families: MEDIA,
-        doc: "no audio (audio arrives with vybe-audio)",
+        doc: "video: no sound",
     },
     ModWord {
         kind: ModKind::Vol,
         name: "vol",
         args: &["v"],
         families: MEDIA,
-        doc: "audio volume, 0..1 (audio arrives with vybe-audio)",
+        doc: "video: volume, 0..1 — it also follows the scene's fade, so a crossfade is one of sound too",
     },
 ];
 
