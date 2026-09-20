@@ -8,8 +8,9 @@
 //! line-by-line rebinding, loops that build layers — different spellings of
 //! one AST.
 
-use crate::recipe::{Force, Source, Stroke};
-use crate::shell;
+use crate::recipe::{Force, Form, Source, Stroke};
+use crate::shell::{self, Show};
+use crate::stage::Stage;
 
 // ---------------------------------------------------------------------------
 // The texture world (the Braid/Hydra lineage)
@@ -41,7 +42,7 @@ impl Signal {
     /// The terminal link: opens the window, brings up the GPU, and runs the
     /// render loop. (In the future this becomes `.out()`.)
     pub fn show(self) {
-        shell::run(self.flatten());
+        Show::new(shell::Source::Still(self.flatten())).run();
     }
 }
 
@@ -97,6 +98,29 @@ pub fn circle(radius: f32) -> Shape {
             radius,
             ..Stroke::IDENTITY
         },
+        is_line: false,
+    }
+}
+
+/// Births a [`Shape`]: a rectangle, `width × height` as fractions of its grid
+/// cell — with no grid, of the scene: `rect(1.0, 1.0)` is the unit square.
+pub fn rect(width: f32, height: f32) -> Shape {
+    Shape {
+        stroke: Stroke {
+            form: Form::Rect,
+            extent: [width, height],
+            ..Stroke::IDENTITY
+        },
+        is_line: false,
+    }
+}
+
+/// Births a [`Shape`]: a line between two points in scene space. Thin by
+/// default; [`Shape::stroke`] sets its width.
+pub fn line(from: (f32, f32), to: (f32, f32)) -> Shape {
+    Shape {
+        stroke: Stroke::line([from.0, from.1], [to.0, to.1], 0.004),
+        is_line: true,
     }
 }
 
@@ -106,6 +130,8 @@ pub fn circle(radius: f32) -> Shape {
 #[derive(Clone)]
 pub struct Shape {
     pub(crate) stroke: Stroke,
+    /// A line's stroke is its own width; a closed form's is its outline.
+    is_line: bool,
 }
 
 impl Shape {
@@ -150,6 +176,31 @@ impl Shape {
         self
     }
 
+    /// Draws the form as a line of this width (scene units) instead of a fill:
+    /// a closed form becomes its outline, kept inside its edge; a [`line`]
+    /// takes it as its thickness.
+    pub fn stroke(mut self, width: f32) -> Self {
+        if self.is_line {
+            self.stroke.extent[1] = width;
+        } else {
+            self.stroke.outline = width;
+        }
+        self
+    }
+
+    /// Paints in gray: `0.0` black, `1.0` white. (After a `hue()`, it is that
+    /// hue's brightness.)
+    pub fn gray(mut self, value: f32) -> Self {
+        self.stroke.value = value;
+        self
+    }
+
+    /// The shape's opacity.
+    pub fn alpha(mut self, alpha: f32) -> Self {
+        self.stroke.alpha = alpha;
+        self
+    }
+
     /// Grows the shape by proximity to a position source, parametrized by a
     /// [`Falloff`]. The source is the swell's epicenter — `grow(mouse(), ..)`
     /// tracks the pointer, `grow((x, y), ..)` pins it, and a tuned pair
@@ -176,7 +227,7 @@ impl Shape {
     /// The terminal link: opens the window, brings up the GPU, and runs the
     /// render loop.
     pub fn show(self) {
-        shell::run(self.flatten());
+        Show::new(shell::Source::Still(self.flatten())).run();
     }
 }
 
@@ -369,7 +420,7 @@ impl Layers {
     /// The terminal link: opens the window, brings up the GPU, and runs the
     /// render loop.
     pub fn show(self) {
-        shell::run(self.flatten());
+        Show::new(shell::Source::Still(self.flatten())).run();
     }
 }
 
@@ -454,7 +505,7 @@ impl Particles {
     /// The terminal link: opens the window, brings up the GPU, and runs the
     /// render loop.
     pub fn show(self) {
-        shell::run(self.flatten());
+        Show::new(shell::Source::Still(self.flatten())).run();
     }
 }
 
@@ -523,7 +574,11 @@ mod sealed {
                                 World::Signal(s) => s.flatten(),
                                 World::Particles(p) => p.flatten(),
                             };
-                            CompositeLayer { blend, recipe }
+                            CompositeLayer {
+                                blend,
+                                recipe,
+                                alpha: 1.0,
+                            }
                         })
                         .collect(),
                 )
@@ -567,9 +622,20 @@ impl Chain for Particles {}
 /// This is the hot-reload seam in miniature — the tweak panel turns it
 /// today; MIDI, OSC, and the script dialects will turn it tomorrow.
 ///
-/// Without any front-end attached, `live` behaves exactly like `.show()`.
-pub fn live<C: Chain>(sketch: impl Fn() -> C + 'static) {
-    shell::run_live(Box::new(move || sketch().flatten()));
+/// Returns the [`Stage`] the sketch will run on, so bindings can be hung on it
+/// before the terminal `.show()`:
+///
+/// ```ignore
+/// live(|| circle(tune("r", 0.2, 0.0..=0.5)))
+///     .with(arrows_nudge("*"))
+///     .on(Key::Char('s'), |_| println!("saved"))
+///     .show();
+/// ```
+///
+/// Without any front-end attached, `live(..).show()` behaves exactly like
+/// `.show()` on the chain.
+pub fn live<C: Chain>(sketch: impl Fn() -> C + 'static) -> Stage {
+    Stage::new(shell::Source::Live(Box::new(move || sketch().flatten())))
 }
 
 // ---------------------------------------------------------------------------

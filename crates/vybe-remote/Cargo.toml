@@ -1,0 +1,14 @@
+[package]
+name = "vybe-remote"
+version = "0.0.2"
+edition = "2024"
+rust-version = "1.85"
+description = "vybe's remote protocol over OSC — both ends of it — and the keystone remote: a vybe sketch that calibrates a face from a laptop."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sulram/vybe"
+publish = false
+
+[dependencies]
+vybe = { path = "../.." }
+vybe-io = { path = "../vybe-io" }
+keystone = { path = "../keystone" }

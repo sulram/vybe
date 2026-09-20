@@ -1,5 +1,6 @@
-// Shape pass: instanced circles — one quad per instance, the circle cut by an
-// SDF in the fragment shader. Everything derives from the instance index and
+// Shape pass: instanced shapes — one quad per instance, the form (circle or
+// rect; a line is a rect laid along its two points) cut by an SDF in the
+// fragment shader. Everything derives from the instance index and
 // two small uniform blocks; no vertex or instance buffers ever cross to the
 // GPU (the anti-bottleneck stance, literal).
 //
@@ -38,16 +39,20 @@ struct Stroke {
     falloff_min: f32,      // scene units: full effect inside this distance
     falloff_max: f32,      // scene units: no effect beyond this distance
     falloff_scale: f32,    // radius multiplier at the epicenter
-    _pad0: f32,
-    _pad1: f32,
-    _pad2: f32,
+    form: f32,             // 0 circle · 1 rect
+    extent: vec2<f32>,     // rect width/height, as a fraction of the cell
+    angle: f32,            // rotation, radians, counter-clockwise
+    value: f32,            // brightness: 0 = black, 1 = full
+    alpha: f32,            // opacity of the whole stroke
+    outline: f32,          // outline width, scene units, inside the edge; 0 = filled
 };
 
 @group(1) @binding(0) var<uniform> stroke: Stroke;
 
 struct VsOut {
     @builtin(position) pos: vec4<f32>,
-    @location(0) local: vec2<f32>, // -1..+1 across the quad: the SDF domain
+    @location(0) local: vec2<f32>,               // scene units from the shape's center, unrotated: the SDF domain
+    @location(1) @interpolate(flat) half: vec2<f32>, // the form's half-size, scene units
 };
 
 const TAU: f32 = 6.28318530718;
@@ -110,16 +115,24 @@ fn vs(@builtin(vertex_index) vi: u32, @builtin(instance_index) ii: u32) -> VsOut
     let grow_center = mix(stroke.grow_at, frame.mouse, stroke.grow_mouse);
     let d = distance(center, grow_center);
     let t = 1.0 - smoothstep(stroke.falloff_min, stroke.falloff_max, d);
-    let r = stroke.radius * cell * mix(1.0, stroke.falloff_scale, t);
+    let growth = cell * mix(1.0, stroke.falloff_scale, t);
+    let half = select(stroke.extent * 0.5, vec2<f32>(stroke.radius), stroke.form < 0.5) * growth;
+
+    // The quad hugs the form, turned by `angle` around its center.
+    let local = corner * half;
+    let ca = cos(stroke.angle);
+    let sa = sin(stroke.angle);
+    let turned = vec2<f32>(local.x * ca - local.y * sa, local.x * sa + local.y * ca);
 
     // Scene -> clip: the shorter edge (±0.5 scene) maps to ±1 NDC; the longer
     // edge just sees more world, so circles stay circles on any aspect.
-    let scene = center + corner * r;
+    let scene = center + turned;
     let clip = scene * 2.0 * min(frame.resolution.x, frame.resolution.y) / frame.resolution;
 
     var out: VsOut;
     out.pos = vec4<f32>(clip, 0.0, 1.0);
-    out.local = corner;
+    out.local = local;
+    out.half = half;
     return out;
 }
 
@@ -131,12 +144,29 @@ fn hsv2rgb(h: f32, s: f32, v: f32) -> vec3<f32> {
 
 @fragment
 fn fs(in: VsOut) -> @location(0) vec4<f32> {
-    // A circle out of the quad: radial distance; the edge is either a ~1px
-    // anti-aliased rim (soft = 0) or a fade toward the center (soft -> 1).
-    let d = length(in.local);
-    let edge = max(stroke.soft, fwidth(d));
-    let alpha = 1.0 - smoothstep(1.0 - edge, 1.0, d);
+    // The form out of the quad: a signed distance in scene units (negative
+    // inside), and the depth of the form's interior to normalize it by.
+    var d = length(in.local) - in.half.x;
+    var depth = in.half.x;
+    if stroke.form > 0.5 {
+        let q = abs(in.local) - in.half;
+        d = length(max(q, vec2<f32>(0.0))) + min(max(q.x, q.y), 0.0);
+        depth = min(in.half.x, in.half.y);
+    }
+    // An outline is the band just inside the edge — a form of its own, half
+    // the width deep.
+    if stroke.outline > 0.0 {
+        let w = min(stroke.outline, depth) * 0.5;
+        d = abs(d + w) - w;
+        depth = w;
+    }
 
-    let color = hsv2rgb(stroke.hue + stroke.hue_drift * frame.time, stroke.sat, 1.0);
-    return vec4<f32>(color, alpha);
+    // Normalized: 0 at the deepest point, 1 on the edge. The edge is either a
+    // ~1px anti-aliased rim (soft = 0) or a fade toward the center (soft -> 1).
+    let n = 1.0 + d / max(depth, 1e-6);
+    let edge = max(stroke.soft, fwidth(n));
+    let alpha = 1.0 - smoothstep(1.0 - edge, 1.0, n);
+
+    let color = hsv2rgb(stroke.hue + stroke.hue_drift * frame.time, stroke.sat, stroke.value);
+    return vec4<f32>(color, alpha * stroke.alpha);
 }

@@ -1,23 +1,44 @@
 //! THE GPU CORE — all of wgpu, hidden behind the knobs (Principle 4). Nothing
 //! in this module ever shows up in a sketch.
 //!
+//! **The shape of it.** A [`Recipe`] flattens into a list of *nodes* in
+//! dependency order; every node renders into its own signal texture, and a mix
+//! node samples the nodes before it. The last node is the picture; one present
+//! pass lands it on the output — a window's swapchain ([`State`]) or a headless
+//! frame ([`Headless`]) — through the stage's [`Warp`]. One path for every
+//! recipe: the same node list runs a bare circle and a four-scene patch.
+//!
+//! **Key = identity.** Nodes are keyed (by name where the recipe gives one, by
+//! position otherwise). Re-describing a recipe reconciles against the running
+//! nodes by key: a node whose key and kind survive keeps its GPU state — its
+//! feedback trail, its particle buffer — and only its knobs move. That is what
+//! lets a patch be re-described *every frame*.
+//!
 //! Uniforms are split by cadence: **group(0)** is the frame block, shared by
 //! every pass and rewritten 60x/s (resolution, mouse, time); **group(1)** is
-//! the static knobs of one stroke or one swirl, written once at build time.
-//! That split is the anti-bottleneck stance in binary form: per-frame traffic
-//! across the boundary is a handful of floats, no matter how much is drawn.
+//! the knobs of one stroke or one swirl. That split is the anti-bottleneck
+//! stance in binary form: per-frame traffic across the boundary is a handful
+//! of floats, no matter how much is drawn.
 
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Instant;
 
+use bytemuck::Zeroable;
 use winit::window::Window;
 
-use crate::recipe::{CompositeLayer, Force, Recipe, Stroke};
+use crate::media::{self, Pixels};
+use crate::recipe::{Fit, Force, Form, Image, Recipe, Stroke};
+use crate::stage::Warp;
 use crate::sugar::{Blend, Osc, Swirl};
 
 /// Signal format: float16 per channel, like Braid/Satin. HDR headroom so the
 /// feedback can accumulate without clipping too early.
 const SIGNAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+/// What a headless frame is written as: 8-bit sRGB, ready to be a PNG.
+const CAPTURE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 
 // ---------------------------------------------------------------------------
 // Uniform blocks — the data bridge recipe -> shader.
@@ -29,45 +50,12 @@ const SIGNAL_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
 struct FrameUniforms {
     resolution: [f32; 2], // physical pixels
     mouse: [f32; 2],      // scene space
-    time: f32,            // seconds since start (wall clock)
+    time: f32,            // seconds since start
     dt: f32,              // seconds since last frame
     _pad: [f32; 2],
 }
 
-/// The engine's sense of time: wall-clock, so motion is framerate-independent
-/// (`Wave` in cycles/second, `Hue.drift` in degrees/second mean what they say
-/// on any monitor). `dt` lets per-frame effects (the feedback loop) run at a
-/// rate, not a cadence.
-///
-/// This struct is the one place the engine reads a real clock — the seam to
-/// swap for Phase 2/WASM, where `Instant::now()` panics on
-/// `wasm32-unknown-unknown` (use `web_time` there).
-struct Clock {
-    start: Instant,
-    last: Instant,
-}
-
-impl Clock {
-    fn new() -> Self {
-        let now = Instant::now();
-        Self {
-            start: now,
-            last: now,
-        }
-    }
-
-    /// (seconds since start, seconds since last frame). `dt` is clamped so a
-    /// stall or the first frame can't jolt the animation with a huge step.
-    fn tick(&mut self) -> (f32, f32) {
-        let now = Instant::now();
-        let time = now.duration_since(self.start).as_secs_f32();
-        let dt = now.duration_since(self.last).as_secs_f32().min(0.1);
-        self.last = now;
-        (time, dt)
-    }
-}
-
-/// group(1) of the shape pipeline: one stroke's knobs, written once.
+/// group(1) of the shape pipeline: one stroke's knobs, refreshed every frame.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct StrokeUniforms {
@@ -91,7 +79,12 @@ struct StrokeUniforms {
     falloff_min: f32,
     falloff_max: f32,
     falloff_scale: f32,
-    _pad: [f32; 3],
+    form: f32, // Form as an index: 0 circle · 1 rect
+    extent: [f32; 2],
+    angle: f32,
+    value: f32,
+    alpha: f32,
+    outline: f32,
 }
 
 impl StrokeUniforms {
@@ -121,12 +114,20 @@ impl StrokeUniforms {
             falloff_min: s.falloff.min,
             falloff_max: s.falloff.max,
             falloff_scale: s.falloff.scale,
-            _pad: [0.0; 3],
+            form: match s.form {
+                Form::Circle => 0.0,
+                Form::Rect => 1.0,
+            },
+            extent: s.extent,
+            angle: s.angle,
+            value: s.value,
+            alpha: s.alpha,
+            outline: s.outline,
         }
     }
 }
 
-/// group(1) of the feedback pipeline: the swirl knobs, written once.
+/// group(1) of the feedback pipeline: the swirl knobs.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct SwirlUniforms {
@@ -134,6 +135,46 @@ struct SwirlUniforms {
     angle: f32,
     scale: f32,
     _pad: f32,
+}
+
+impl SwirlUniforms {
+    fn new(swirl: Swirl) -> Self {
+        Self {
+            decay: swirl.decay,
+            angle: swirl.angle,
+            scale: swirl.scale,
+            _pad: 0.0,
+        }
+    }
+}
+
+/// The knob of one mix input (composite.wgsl): its opacity.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct LayerUniforms {
+    alpha: f32,
+    _pad: [f32; 3],
+}
+
+/// An image's quad (image.wgsl), fitted on the CPU.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct QuadUniforms {
+    center: [f32; 2],
+    half: [f32; 2],
+    alpha: f32,
+    _pad: [f32; 3],
+}
+
+/// The stage's warp (present.wgsl): a homography, a feather, and whether the
+/// output keeps its alpha.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct WarpUniforms {
+    rows: [[f32; 4]; 3],
+    feather: f32,
+    keep_alpha: f32,
+    _pad: [f32; 2],
 }
 
 /// One particle's state, in the storage buffer the compute shader steps.
@@ -238,7 +279,119 @@ fn encode_forces(forces: &[Force]) -> ForcesUniforms {
 }
 
 // ---------------------------------------------------------------------------
-// GPU resources per recipe kind.
+// The kit — every pipeline, layout and sampler, built once per device. All
+// nodes render into `SIGNAL_FORMAT`, so one pipeline per shader serves them all.
+// ---------------------------------------------------------------------------
+
+struct Kit {
+    frame_layout: wgpu::BindGroupLayout,
+    stroke_layout: wgpu::BindGroupLayout,
+    feedback_layout: wgpu::BindGroupLayout,
+    /// A texture, its sampler, and one small uniform block — the layout shared
+    /// by everything that samples a signal: mix, image, present.
+    sampled_layout: wgpu::BindGroupLayout,
+    shape_pipeline: wgpu::RenderPipeline,
+    feedback_pipeline: wgpu::RenderPipeline,
+    /// One compositor pipeline per [`Blend`] — same shader, different blend
+    /// state — so a stack can mix modes without rebuilding anything per frame.
+    add_pipeline: wgpu::RenderPipeline,
+    over_pipeline: wgpu::RenderPipeline,
+    image_pipeline: wgpu::RenderPipeline,
+    sampler: wgpu::Sampler,
+}
+
+impl Kit {
+    fn new(device: &wgpu::Device) -> Self {
+        let shader = |label: &str, source: &str| {
+            device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some(label),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            })
+        };
+        let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("frame bind group layout"),
+            entries: &[uniform_entry(0)],
+        });
+        let stroke_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("stroke bind group layout"),
+            entries: &[uniform_entry(0)],
+        });
+        let feedback_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("feedback bind group layout"),
+            entries: &[
+                uniform_entry(0),
+                texture_entry(1),
+                sampler_entry(2),
+                texture_entry(3),
+            ],
+        });
+        let sampled_layout = sampled_bind_group_layout(device);
+
+        let shape_pipeline = make_pipeline(
+            device,
+            &shader("shape.wgsl", include_str!("shaders/shape.wgsl")),
+            &[&frame_layout, &stroke_layout],
+            SIGNAL_FORMAT,
+            // The SDF's anti-aliased rim needs alpha blending.
+            Some(wgpu::BlendState::ALPHA_BLENDING),
+            "shape pipeline",
+        );
+        let feedback_pipeline = make_pipeline(
+            device,
+            &shader("feedback.wgsl", include_str!("shaders/feedback.wgsl")),
+            &[&frame_layout, &feedback_layout],
+            SIGNAL_FORMAT,
+            None,
+            "feedback pipeline",
+        );
+        let composite = shader("composite.wgsl", include_str!("shaders/composite.wgsl"));
+        let mix_pipeline = |blend, label| {
+            make_pipeline(
+                device,
+                &composite,
+                &[&sampled_layout],
+                SIGNAL_FORMAT,
+                Some(blend_state(blend)),
+                label,
+            )
+        };
+        let add_pipeline = mix_pipeline(Blend::Add, "composite pipeline (add)");
+        let over_pipeline = mix_pipeline(Blend::Over, "composite pipeline (over)");
+        let image_pipeline = make_pipeline(
+            device,
+            &shader("image.wgsl", include_str!("shaders/image.wgsl")),
+            &[&frame_layout, &sampled_layout],
+            SIGNAL_FORMAT,
+            // The shader premultiplies; `over` reads straight off that.
+            Some(blend_state(Blend::Over)),
+            "image pipeline",
+        );
+
+        Self {
+            frame_layout,
+            stroke_layout,
+            feedback_layout,
+            sampled_layout,
+            shape_pipeline,
+            feedback_pipeline,
+            add_pipeline,
+            over_pipeline,
+            image_pipeline,
+            sampler: make_linear_clamp_sampler(device),
+        }
+    }
+
+    /// The compositor pipeline for a layer's blend mode.
+    fn mix_pipeline(&self, blend: Blend) -> &wgpu::RenderPipeline {
+        match blend {
+            Blend::Add => &self.add_pipeline,
+            Blend::Over => &self.over_pipeline,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Nodes — one per world in the flattened recipe.
 // ---------------------------------------------------------------------------
 
 /// One stroke, ready to draw: its uniform buffer and bind group.
@@ -247,27 +400,28 @@ struct StrokeDraw {
     bind_group: wgpu::BindGroup,
 }
 
-/// The shape pipeline, the strokes it draws (in painter's order), and their
-/// GPU-side twins. `strokes` is the single source of truth — knobs are LIVE:
-/// refreshed to the GPU every frame, so anything may retune them while the
-/// sketch runs (the tweak panel today; MIDI/OSC/scripts tomorrow).
+/// The strokes a node draws (in painter's order) and their GPU-side twins.
+/// `strokes` is the single source of truth — knobs are LIVE: refreshed to the
+/// GPU every frame, so anything may retune them while the sketch runs (the
+/// tweak panel, a patch's Scalars, OSC).
 struct ShapePass {
-    pipeline: wgpu::RenderPipeline,
     strokes: Vec<Stroke>,
     draws: Vec<StrokeDraw>,
 }
 
 impl ShapePass {
-    /// Swap in a live sketch's re-described strokes. GPU twins are reused;
-    /// only a change in stroke count allocates.
-    fn replace(
-        &mut self,
-        device: &wgpu::Device,
-        layout: &wgpu::BindGroupLayout,
-        strokes: Vec<Stroke>,
-    ) {
+    fn new(device: &wgpu::Device, kit: &Kit, strokes: Vec<Stroke>) -> Self {
+        Self {
+            draws: build_strokes(device, &kit.stroke_layout, strokes.len()),
+            strokes,
+        }
+    }
+
+    /// Swap in re-described strokes. GPU twins are reused; only a change in
+    /// stroke count allocates.
+    fn replace(&mut self, device: &wgpu::Device, kit: &Kit, strokes: Vec<Stroke>) {
         if strokes.len() != self.draws.len() {
-            self.draws = build_strokes(device, layout, strokes.len());
+            self.draws = build_strokes(device, &kit.stroke_layout, strokes.len());
         }
         self.strokes = strokes;
     }
@@ -283,8 +437,8 @@ impl ShapePass {
         }
     }
 
-    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, frame_bg: &wgpu::BindGroup) {
-        pass.set_pipeline(&self.pipeline);
+    fn draw(&self, pass: &mut wgpu::RenderPass<'_>, kit: &Kit, frame_bg: &wgpu::BindGroup) {
+        pass.set_pipeline(&kit.shape_pipeline);
         pass.set_bind_group(0, frame_bg, &[]);
         for (draw, stroke) in self.draws.iter().zip(&self.strokes) {
             pass.set_bind_group(1, &draw.bind_group, &[]);
@@ -293,229 +447,184 @@ impl ShapePass {
     }
 }
 
-/// The GPU resources of each recipe kind. One variant per [`Recipe`] variant.
-// Exactly one `Passes` exists per window, for the whole run — the variant size
-// gap is a few bytes of one-time memory, so boxing (heap + indirection every
-// render match) would trade clarity for nothing.
-#[allow(clippy::large_enum_variant)]
-enum Passes {
-    /// One render pass straight to the swapchain; one draw per stroke.
-    Shapes(ShapePass),
-    /// Three passes: strokes -> source signal; swirl(previous) + source ->
-    /// next signal; present. The ping-pong stays hidden behind the knob.
+/// A recipe, flattened: what one node is, with its inputs already resolved to
+/// positions in the node list (always earlier ones — the list is in dependency
+/// order by construction).
+enum Desc {
+    Shapes(Vec<Stroke>),
+    Feedback { source: Vec<Stroke>, swirl: Swirl },
+    Points { count: u32, forces: Vec<Force> },
+    Image(Image),
+    Mix(Vec<MixDesc>),
+}
+
+struct MixDesc {
+    from: usize,
+    blend: Blend,
+    alpha: f32,
+}
+
+/// Flattens `recipe` into `out`, children before parents, and returns the
+/// position of the node it became. A [`Recipe::Named`] already in the list is
+/// not added again — it *is* that node (key = identity); an unnamed world is
+/// keyed by its path in the tree, so a re-described chain of the same shape
+/// lands on the same keys.
+fn flatten(recipe: Recipe, key: String, out: &mut Vec<(String, Desc)>) -> usize {
+    let desc = match recipe {
+        Recipe::Named(name, inner) => {
+            return match out.iter().position(|(k, _)| *k == name) {
+                Some(index) => index,
+                None => flatten(*inner, name, out),
+            };
+        }
+        Recipe::Composite(layers) => Desc::Mix(
+            layers
+                .into_iter()
+                .enumerate()
+                .map(|(i, layer)| MixDesc {
+                    from: flatten(layer.recipe, format!("{key}/{i}"), out),
+                    blend: layer.blend,
+                    alpha: layer.alpha,
+                })
+                .collect(),
+        ),
+        Recipe::Shapes(strokes) => Desc::Shapes(strokes),
+        Recipe::Feedback { source, swirl } => Desc::Feedback { source, swirl },
+        Recipe::Points { count, forces } => Desc::Points { count, forces },
+        Recipe::Image(image) => Desc::Image(image),
+    };
+    out.push((key, desc));
+    out.len() - 1
+}
+
+/// One world, rendering into its own signal texture(s).
+struct Node {
+    key: String,
+    kind: Kind,
+    /// Changes whenever this node's textures are (re)created — what a bind
+    /// group sampling them is checked against.
+    generation: u64,
+}
+
+enum Kind {
+    /// Geometry, one pass.
+    Shapes {
+        shapes: ShapePass,
+        target: wgpu::TextureView,
+    },
+    /// Two passes: strokes -> source signal; swirl(previous) + source -> next
+    /// signal. The ping-pong stays hidden behind the knob.
     Feedback {
-        shapes: ShapePass, // targets the source signal, not the screen
-        feedback_pipeline: wgpu::RenderPipeline,
-        feedback_layout: wgpu::BindGroupLayout,
-        present_pipeline: wgpu::RenderPipeline,
-        present_layout: wgpu::BindGroupLayout,
+        shapes: ShapePass,
         swirl_uniforms: wgpu::Buffer,
-        sampler: wgpu::Sampler,
         targets: FeedbackTargets,
     },
-    /// The point-cloud signal type: a [`PointsPass`] (compute step + instanced
-    /// draw) rendered straight to the screen.
-    Points(PointsPass),
-    /// A stack of worlds, each rendered to its own offscreen signal texture,
-    /// then combined onto the screen — feedback on one layer, still geometry on
-    /// another, no smearing across them. The compositor is `composite.wgsl`
-    /// drawn once per layer, its fixed-function blend chosen by the stack's
-    /// [`Blend`]: over (alpha, one world on another — the default) or additive
-    /// (glow).
-    Composite(Composite),
+    /// The point-cloud signal type: a compute step + an instanced draw.
+    Points {
+        pass: Box<PointsPass>,
+        target: wgpu::TextureView,
+    },
+    /// One frame of a sequence, as a textured quad.
+    Image {
+        image: Image,
+        sizes: Vec<[u32; 2]>,
+        /// `bgs[i]` samples frame `i`.
+        bgs: Vec<wgpu::BindGroup>,
+        uniforms: wgpu::Buffer,
+        target: wgpu::TextureView,
+    },
+    /// A stack: samples earlier nodes, bottom to top, each by its blend and
+    /// opacity — feedback on one layer, still geometry on another, no smearing
+    /// across them.
+    Mix {
+        inputs: Vec<MixInput>,
+        target: wgpu::TextureView,
+    },
 }
 
-/// The composited stack: the layers plus the pieces shared across them (the
-/// compositor pipeline, the two bind-group layouts a layer rebuilds on resize,
-/// and the one sampler). Owns nothing per-frame.
-struct Composite {
-    layers: Vec<Layer>,
-    /// One compositor pipeline per [`Blend`] — same shader, different blend
-    /// state — so a stack can mix modes (add on one layer, over on the next)
-    /// without rebuilding anything per frame.
-    add_pipeline: wgpu::RenderPipeline,
-    over_pipeline: wgpu::RenderPipeline,
-    present_layout: wgpu::BindGroupLayout,
-    feedback_layout: wgpu::BindGroupLayout,
-    sampler: wgpu::Sampler,
-}
-
-impl Composite {
-    /// The compositor pipeline for a layer's blend mode.
-    fn pipeline_for(&self, blend: Blend) -> &wgpu::RenderPipeline {
-        match blend {
-            Blend::Add => &self.add_pipeline,
-            Blend::Over => &self.over_pipeline,
-        }
-    }
-}
-
-/// One world in a [`Composite`]: renders to its own signal texture, which the
-/// compositor samples. A plain-geometry layer is one pass; a feedback layer is
-/// the same ping-pong dance as [`Passes::Feedback`] minus the present (the
-/// compositor plays that role, per the stack's blend, for the whole stack).
-enum Layer {
-    Shapes(ShapesLayer),
-    // Boxed: a `Vec<Layer>` is mostly the smaller variant, and a feedback or
-    // points layer carries pipelines (and buffers/ping-pong) — indirection
-    // keeps every geometry layer in the stack from paying for it.
-    Feedback(Box<FeedbackLayer>),
-    Points(Box<PointsLayer>),
-}
-
-/// A geometry layer: strokes drawn into `target`; `composite_bg` samples it.
-/// `blend` is how it lands on the worlds beneath it in the compositor.
-struct ShapesLayer {
-    shapes: ShapePass,
-    target: wgpu::TextureView,
-    composite_bg: wgpu::BindGroup,
+struct MixInput {
+    from: usize,
     blend: Blend,
+    alpha: f32,
+    uniforms: wgpu::Buffer,
+    sampled: Sampled,
 }
 
-/// A point-cloud layer: the cloud drawn into `target`; `composite_bg` samples
-/// it. `blend` is how it lands on the worlds beneath it in the compositor.
-struct PointsLayer {
-    pass: PointsPass,
-    target: wgpu::TextureView,
-    composite_bg: wgpu::BindGroup,
-    blend: Blend,
+/// Bind groups sampling another node's views, rebuilt only when that node's
+/// textures change (its generation moves).
+#[derive(Default)]
+struct Sampled {
+    generation: u64,
+    bgs: Vec<wgpu::BindGroup>,
 }
 
-/// A feedback layer: the source pass + the feedback pass, its ping-pong the
-/// layer's output. `swirl_uniforms` is kept only so a resize can rebuild the
-/// size-dependent targets.
-struct FeedbackLayer {
-    shapes: ShapePass,
-    feedback_pipeline: wgpu::RenderPipeline,
-    swirl_uniforms: wgpu::Buffer,
-    targets: FeedbackTargets,
-    blend: Blend,
-}
-
-impl Layer {
-    /// Render this layer's world into its offscreen texture(s) for this frame.
-    fn render(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        queue: &wgpu::Queue,
-        frame_bg: &wgpu::BindGroup,
-    ) {
-        match self {
-            Layer::Shapes(l) => {
-                l.shapes.refresh(queue); // knobs are live
-                let mut pass = begin_pass_clear(
-                    encoder,
-                    &l.target,
-                    "layer shapes pass",
-                    wgpu::Color::TRANSPARENT,
-                );
-                l.shapes.draw(&mut pass, frame_bg);
-            }
-            Layer::Points(l) => {
-                // The cloud steps and draws into its own transparent texture, so
-                // its empty space carries no coverage and `over` reveals what's
-                // beneath (add ignores alpha either way).
-                l.pass
-                    .render(encoder, &l.target, frame_bg, wgpu::Color::TRANSPARENT);
-            }
-            Layer::Feedback(l) => {
-                l.shapes.refresh(queue); // knobs are live
-                // Pass 1: the layer's geometry -> its source signal.
-                {
-                    let mut pass = begin_pass_clear(
-                        encoder,
-                        &l.targets.source,
-                        "layer source pass",
-                        wgpu::Color::TRANSPARENT,
-                    );
-                    l.shapes.draw(&mut pass, frame_bg);
-                }
-                // Pass 2: swirl(previous) + source -> the next signal.
-                {
-                    let mut pass =
-                        begin_pass(encoder, l.targets.ping_pong.write(), "layer feedback pass");
-                    pass.set_pipeline(&l.feedback_pipeline);
-                    pass.set_bind_group(0, frame_bg, &[]);
-                    pass.set_bind_group(1, &l.targets.feedback_bgs[l.targets.ping_pong.front], &[]);
-                    pass.draw(0..3, 0..1);
-                }
-            }
-        }
-    }
-
-    /// The bind group the compositor samples this frame (a feedback layer's
-    /// output is the ping-pong side just written).
-    fn composite_bg(&self) -> &wgpu::BindGroup {
-        match self {
-            Layer::Shapes(l) => &l.composite_bg,
-            Layer::Points(l) => &l.composite_bg,
-            Layer::Feedback(l) => &l.targets.present_bgs[1 - l.targets.ping_pong.front],
-        }
-    }
-
-    /// How this layer blends onto the worlds beneath it in the compositor.
-    fn blend(&self) -> Blend {
-        match self {
-            Layer::Shapes(l) => l.blend,
-            Layer::Points(l) => l.blend,
-            Layer::Feedback(l) => l.blend,
-        }
-    }
-
-    /// After compositing, advance a feedback layer's ping-pong (geometry layers
-    /// hold nothing that alternates).
-    fn swap(&mut self) {
-        if let Layer::Feedback(l) = self {
-            l.targets.ping_pong.swap();
-        }
-    }
-
-    /// Rebuild the size-dependent resources (the pipelines and knob buffers
-    /// survive) — the composite counterpart of [`build_feedback_targets`].
-    fn resize(
+impl Sampled {
+    /// The bind group sampling `node`'s current view through `uniforms`.
+    fn of(
         &mut self,
         device: &wgpu::Device,
-        present_layout: &wgpu::BindGroupLayout,
-        feedback_layout: &wgpu::BindGroupLayout,
-        sampler: &wgpu::Sampler,
-        width: u32,
-        height: u32,
-    ) {
-        match self {
-            Layer::Shapes(l) => {
-                l.target = make_signal_texture(device, width, height, "layer target");
-                l.composite_bg = present_bind_group(device, present_layout, &l.target, sampler);
+        kit: &Kit,
+        node: &Node,
+        uniforms: &wgpu::Buffer,
+    ) -> &wgpu::BindGroup {
+        if self.generation != node.generation {
+            self.generation = node.generation;
+            self.bgs = node
+                .views()
+                .iter()
+                .map(|view| {
+                    sampled_bind_group(device, &kit.sampled_layout, view, &kit.sampler, uniforms)
+                })
+                .collect();
+        }
+        &self.bgs[node.current()]
+    }
+}
+
+impl Node {
+    /// The texture(s) this node renders into. A feedback node has two (the
+    /// ping-pong); [`Node::current`] says which holds this frame.
+    fn views(&self) -> &[wgpu::TextureView] {
+        match &self.kind {
+            Kind::Shapes { target, .. }
+            | Kind::Points { target, .. }
+            | Kind::Image { target, .. }
+            | Kind::Mix { target, .. } => std::slice::from_ref(target),
+            Kind::Feedback { targets, .. } => &targets.ping_pong.views,
+        }
+    }
+
+    fn current(&self) -> usize {
+        match &self.kind {
+            Kind::Feedback { targets, .. } => targets.ping_pong.front,
+            _ => 0,
+        }
+    }
+
+    /// Can this running node become `desc` without losing its state?
+    fn accepts(&self, desc: &Desc) -> bool {
+        match (&self.kind, desc) {
+            (Kind::Shapes { .. }, Desc::Shapes(_))
+            | (Kind::Feedback { .. }, Desc::Feedback { .. })
+            | (Kind::Mix { .. }, Desc::Mix(_)) => true,
+            // A cloud of another size is another buffer.
+            (Kind::Points { pass, .. }, Desc::Points { count, .. }) => pass.count == *count,
+            // Another sequence is another set of textures.
+            (Kind::Image { image, .. }, Desc::Image(next)) => {
+                Arc::ptr_eq(&image.frames, &next.frames) || image.frames == next.frames
             }
-            Layer::Points(l) => {
-                // Only the target is size-dependent; the cloud (buffer, pipelines)
-                // survives, so the simulation keeps running across a resize.
-                l.target = make_signal_texture(device, width, height, "layer points target");
-                l.composite_bg = present_bind_group(device, present_layout, &l.target, sampler);
-            }
-            Layer::Feedback(l) => {
-                l.targets = build_feedback_targets(
-                    device,
-                    width,
-                    height,
-                    sampler,
-                    &l.swirl_uniforms,
-                    feedback_layout,
-                    present_layout,
-                );
-            }
+            _ => false,
         }
     }
 }
 
-/// Everything that depends on the window size — rebuilt on resize (the trail
+/// Everything that depends on the output size — rebuilt on resize (the trail
 /// is lost then; fine for now).
 struct FeedbackTargets {
     source: wgpu::TextureView,
     ping_pong: PingPong,
     /// `feedback_bgs[i]` reads `views[i]` as the previous frame.
     feedback_bgs: [wgpu::BindGroup; 2],
-    /// `present_bgs[i]` presents `views[i]`.
-    present_bgs: [wgpu::BindGroup; 2],
 }
 
 /// A ping-pong pair of signal-textures. Each frame we read from one and write
@@ -524,7 +633,9 @@ struct FeedbackTargets {
 struct PingPong {
     // Views keep their textures alive in wgpu.
     views: [wgpu::TextureView; 2],
-    front: usize, // index we READ from this frame
+    /// The side holding the newest frame: read as "previous" while rendering,
+    /// and — once the pass has written the other side and swapped — the output.
+    front: usize,
 }
 
 impl PingPong {
@@ -544,6 +655,554 @@ impl PingPong {
     fn swap(&mut self) {
         self.front = 1 - self.front;
     }
+}
+
+/// A decoded image on the GPU. Shared: a sequence re-described, or used by two
+/// nodes, uploads once.
+struct ImageTex {
+    view: wgpu::TextureView,
+    size: [u32; 2],
+}
+
+// ---------------------------------------------------------------------------
+// Engine — the device, the kit, and the running nodes. Knows nothing of where
+// the picture goes; [`State`] and [`Headless`] each put a [`Presenter`] after it.
+// ---------------------------------------------------------------------------
+
+pub(crate) struct Engine {
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    kit: Kit,
+    frame_uniforms: wgpu::Buffer,
+    frame_bg: wgpu::BindGroup,
+    nodes: Vec<Node>,
+    images: HashMap<PathBuf, Rc<ImageTex>>,
+    width: u32,
+    height: u32,
+    /// Mouse in scene space. Starts far away so nothing reacts before the
+    /// cursor first enters the window.
+    mouse: [f32; 2],
+    generations: u64,
+}
+
+impl Engine {
+    fn new(device: wgpu::Device, queue: wgpu::Queue, width: u32, height: u32) -> Self {
+        let kit = Kit::new(&device);
+        // The frame block: one small buffer shared by every pass (group 0).
+        let frame_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frame uniforms"),
+            size: std::mem::size_of::<FrameUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let frame_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("frame bind group"),
+            layout: &kit.frame_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: frame_uniforms.as_entire_binding(),
+            }],
+        });
+        Self {
+            device,
+            queue,
+            kit,
+            frame_uniforms,
+            frame_bg,
+            nodes: Vec::new(),
+            images: HashMap::new(),
+            width,
+            height,
+            mouse: [1e9, 1e9], // far away: at rest until the cursor shows up
+            generations: 0,
+        }
+    }
+
+    /// Decodes and uploads images ahead of their first frame, so a sequence
+    /// that only appears mid-performance doesn't stall the scene it enters.
+    pub(crate) fn preload(&mut self, paths: &[PathBuf]) {
+        for path in paths {
+            self.image(path);
+        }
+    }
+
+    /// The running picture becomes `recipe`. Nodes are reconciled by key: one
+    /// whose key and kind survive keeps its GPU state and only its knobs move
+    /// (cheap — this runs every frame under a patch); anything else is built.
+    pub(crate) fn set_recipe(&mut self, recipe: Recipe) {
+        let mut descs = Vec::new();
+        flatten(recipe, "out".to_owned(), &mut descs);
+
+        let mut running: Vec<Option<Node>> = std::mem::take(&mut self.nodes)
+            .into_iter()
+            .map(Some)
+            .collect();
+        for (key, desc) in descs {
+            let kept = running
+                .iter_mut()
+                .find(|n| n.as_ref().is_some_and(|n| n.key == key && n.accepts(&desc)))
+                .and_then(Option::take);
+            let node = match kept {
+                Some(mut node) => {
+                    self.update(&mut node, desc);
+                    node
+                }
+                None => self.build(key, desc),
+            };
+            self.nodes.push(node);
+        }
+    }
+
+    /// Moves a kept node's knobs to `desc` ([`Node::accepts`] vouched for it).
+    fn update(&self, node: &mut Node, desc: Desc) {
+        match (&mut node.kind, desc) {
+            (Kind::Shapes { shapes, .. }, Desc::Shapes(strokes)) => {
+                shapes.replace(&self.device, &self.kit, strokes);
+            }
+            (
+                Kind::Feedback {
+                    shapes,
+                    swirl_uniforms,
+                    ..
+                },
+                Desc::Feedback { source, swirl },
+            ) => {
+                shapes.replace(&self.device, &self.kit, source);
+                self.queue.write_buffer(
+                    swirl_uniforms,
+                    0,
+                    bytemuck::bytes_of(&SwirlUniforms::new(swirl)),
+                );
+            }
+            // Same-size cloud: only the forces changed — rewrite the tiny force
+            // uniform and keep the particles' live positions.
+            (Kind::Points { pass, .. }, Desc::Points { forces, .. }) => {
+                self.queue.write_buffer(
+                    &pass.forces_uniforms,
+                    0,
+                    bytemuck::bytes_of(&encode_forces(&forces)),
+                );
+            }
+            (Kind::Image { image, .. }, Desc::Image(next)) => *image = next,
+            (Kind::Mix { inputs, .. }, Desc::Mix(descs)) => {
+                if inputs.len() == descs.len() {
+                    for (input, desc) in inputs.iter_mut().zip(descs) {
+                        input.from = desc.from;
+                        input.blend = desc.blend;
+                        input.alpha = desc.alpha;
+                    }
+                } else {
+                    *inputs = self.mix_inputs(descs);
+                }
+            }
+            _ => unreachable!("Node::accepts vouches for the pairing"),
+        }
+    }
+
+    fn build(&mut self, key: String, desc: Desc) -> Node {
+        let (w, h) = (self.width, self.height);
+        let kind = match desc {
+            Desc::Shapes(strokes) => Kind::Shapes {
+                shapes: ShapePass::new(&self.device, &self.kit, strokes),
+                target: make_signal_texture(&self.device, w, h, "shapes target"),
+            },
+            Desc::Feedback { source, swirl } => {
+                let swirl_uniforms = uniform_buffer(
+                    &self.device,
+                    &self.queue,
+                    "swirl uniforms",
+                    &SwirlUniforms::new(swirl),
+                );
+                Kind::Feedback {
+                    shapes: ShapePass::new(&self.device, &self.kit, source),
+                    targets: build_feedback_targets(&self.device, &self.kit, w, h, &swirl_uniforms),
+                    swirl_uniforms,
+                }
+            }
+            Desc::Points { count, forces } => Kind::Points {
+                pass: Box::new(build_points(
+                    &self.device,
+                    &self.queue,
+                    &self.frame_uniforms,
+                    &self.kit.frame_layout,
+                    SIGNAL_FORMAT,
+                    count,
+                    forces,
+                )),
+                target: make_signal_texture(&self.device, w, h, "points target"),
+            },
+            Desc::Image(image) => {
+                let uniforms = uniform_buffer(
+                    &self.device,
+                    &self.queue,
+                    "image quad",
+                    &QuadUniforms::zeroed(),
+                );
+                let frames = image.frames.clone();
+                let texs: Vec<_> = frames.iter().map(|path| self.image(path)).collect();
+                Kind::Image {
+                    image,
+                    sizes: texs.iter().map(|t| t.size).collect(),
+                    bgs: texs
+                        .iter()
+                        .map(|t| {
+                            sampled_bind_group(
+                                &self.device,
+                                &self.kit.sampled_layout,
+                                &t.view,
+                                &self.kit.sampler,
+                                &uniforms,
+                            )
+                        })
+                        .collect(),
+                    uniforms,
+                    target: make_signal_texture(&self.device, w, h, "image target"),
+                }
+            }
+            Desc::Mix(descs) => Kind::Mix {
+                inputs: self.mix_inputs(descs),
+                target: make_signal_texture(&self.device, w, h, "mix target"),
+            },
+        };
+        self.generations += 1;
+        Node {
+            key,
+            kind,
+            generation: self.generations,
+        }
+    }
+
+    fn mix_inputs(&self, descs: Vec<MixDesc>) -> Vec<MixInput> {
+        descs
+            .into_iter()
+            .map(|desc| MixInput {
+                from: desc.from,
+                blend: desc.blend,
+                alpha: desc.alpha,
+                uniforms: uniform_buffer(
+                    &self.device,
+                    &self.queue,
+                    "layer uniforms",
+                    &LayerUniforms::zeroed(),
+                ),
+                sampled: Sampled::default(),
+            })
+            .collect()
+    }
+
+    /// The texture of an image file — decoded and uploaded once, then shared.
+    /// A file that won't load is one clear pixel and one line on stderr: the
+    /// picture goes on (Principle 3); `vybe check` is where it's an error.
+    fn image(&mut self, path: &Path) -> Rc<ImageTex> {
+        if let Some(tex) = self.images.get(path) {
+            return tex.clone();
+        }
+        let pixels = media::load_png(path).unwrap_or_else(|e| {
+            eprintln!("vybe: {e}");
+            Pixels {
+                width: 1,
+                height: 1,
+                rgba: vec![0; 4],
+            }
+        });
+        let size = wgpu::Extent3d {
+            width: pixels.width,
+            height: pixels.height,
+            depth_or_array_layers: 1,
+        };
+        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("image"),
+            size,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            // sRGB in the file, linear in the signal world: the sampler decodes.
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            &pixels.rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * pixels.width),
+                rows_per_image: Some(pixels.height),
+            },
+            size,
+        );
+        let tex = Rc::new(ImageTex {
+            view: texture.create_view(&wgpu::TextureViewDescriptor::default()),
+            size: [pixels.width, pixels.height],
+        });
+        self.images.insert(path.to_owned(), tex.clone());
+        tex
+    }
+
+    /// Only the signal textures are size-dependent; pipelines, knob buffers and
+    /// particle clouds survive. (A feedback trail is lost; fine for now.)
+    fn resize(&mut self, width: u32, height: u32) {
+        (self.width, self.height) = (width, height);
+        for node in &mut self.nodes {
+            let fresh = |label| make_signal_texture(&self.device, width, height, label);
+            match &mut node.kind {
+                Kind::Shapes { target, .. } => *target = fresh("shapes target"),
+                Kind::Points { target, .. } => *target = fresh("points target"),
+                Kind::Image { target, .. } => *target = fresh("image target"),
+                Kind::Mix { target, .. } => *target = fresh("mix target"),
+                Kind::Feedback {
+                    swirl_uniforms,
+                    targets,
+                    ..
+                } => {
+                    *targets = build_feedback_targets(
+                        &self.device,
+                        &self.kit,
+                        width,
+                        height,
+                        swirl_uniforms,
+                    );
+                }
+            }
+            self.generations += 1;
+            node.generation = self.generations;
+        }
+    }
+
+    /// Pixels (y-down, origin top-left) -> scene space (y-up, centered, the
+    /// shorter edge spanning -0.5..+0.5). The sketch never sees a pixel.
+    fn to_scene(&self, x: f32, y: f32) -> [f32; 2] {
+        let (w, h) = (self.width as f32, self.height as f32);
+        let unit = w.min(h);
+        [(x - w * 0.5) / unit, (h * 0.5 - y) / unit]
+    }
+
+    /// Renders every node, in order, for the frame at `time`.
+    fn render(&mut self, encoder: &mut wgpu::CommandEncoder, time: f32, dt: f32) {
+        let u = FrameUniforms {
+            resolution: [self.width as f32, self.height as f32],
+            mouse: self.mouse,
+            time,
+            dt,
+            _pad: [0.0; 2],
+        };
+        self.queue
+            .write_buffer(&self.frame_uniforms, 0, bytemuck::bytes_of(&u));
+
+        let Self {
+            device,
+            queue,
+            kit,
+            frame_bg,
+            nodes,
+            ..
+        } = self;
+        let (device, queue, kit, frame_bg) = (&*device, &*queue, &*kit, &*frame_bg);
+        let frame_size = [u.resolution[0], u.resolution[1]];
+        for i in 0..nodes.len() {
+            // A node samples only nodes before it, so the list splits cleanly
+            // into "already rendered this frame" and "this one".
+            let (before, rest) = nodes.split_at_mut(i);
+            let clear = wgpu::Color::TRANSPARENT;
+            match &mut rest[0].kind {
+                Kind::Shapes { shapes, target } => {
+                    shapes.refresh(queue); // knobs are live
+                    let mut pass = begin_pass(encoder, target, "shapes pass", clear);
+                    shapes.draw(&mut pass, kit, frame_bg);
+                }
+                Kind::Feedback {
+                    shapes, targets, ..
+                } => {
+                    shapes.refresh(queue); // knobs are live
+                    // Pass 1: the chain's geometry -> the source signal.
+                    {
+                        let mut pass = begin_pass(encoder, &targets.source, "source pass", clear);
+                        shapes.draw(&mut pass, kit, frame_bg);
+                    }
+                    // Pass 2: swirl(previous) + source -> the next signal.
+                    {
+                        let mut pass =
+                            begin_pass(encoder, targets.ping_pong.write(), "feedback pass", clear);
+                        pass.set_pipeline(&kit.feedback_pipeline);
+                        pass.set_bind_group(0, frame_bg, &[]);
+                        pass.set_bind_group(1, &targets.feedback_bgs[targets.ping_pong.front], &[]);
+                        pass.draw(0..3, 0..1); // fullscreen triangle
+                    }
+                    // Swap: what we wrote is this frame's output, and next
+                    // frame's "previous".
+                    targets.ping_pong.swap();
+                }
+                Kind::Points { pass, target } => pass.render(encoder, target, frame_bg, clear),
+                Kind::Image {
+                    image,
+                    sizes,
+                    bgs,
+                    uniforms,
+                    target,
+                } => {
+                    let mut pass = begin_pass(encoder, target, "image pass", clear);
+                    // An empty sequence draws nothing (Principle 2).
+                    if !bgs.is_empty() {
+                        let index = image.index.min(bgs.len() - 1);
+                        let quad = fit_quad(image, sizes[index], frame_size);
+                        queue.write_buffer(uniforms, 0, bytemuck::bytes_of(&quad));
+                        pass.set_pipeline(&kit.image_pipeline);
+                        pass.set_bind_group(0, frame_bg, &[]);
+                        pass.set_bind_group(1, &bgs[index], &[]);
+                        pass.draw(0..6, 0..1);
+                    }
+                }
+                Kind::Mix { inputs, target } => {
+                    // One pass draws the inputs bottom to top — the compositor
+                    // is composite.wgsl, each input drawn with the pipeline for
+                    // its own blend (over by alpha, or additive glow).
+                    let mut pass = begin_pass(encoder, target, "mix pass", clear);
+                    for input in inputs.iter_mut() {
+                        let layer = LayerUniforms {
+                            alpha: input.alpha,
+                            _pad: [0.0; 3],
+                        };
+                        queue.write_buffer(&input.uniforms, 0, bytemuck::bytes_of(&layer));
+                        let bg =
+                            input
+                                .sampled
+                                .of(device, kit, &before[input.from], &input.uniforms);
+                        pass.set_pipeline(kit.mix_pipeline(input.blend));
+                        pass.set_bind_group(0, bg, &[]);
+                        pass.draw(0..3, 0..1); // fullscreen triangle
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// An image's quad: contained in its [`Fit`] box, scaled, placed.
+fn fit_quad(image: &Image, size: [u32; 2], frame: [f32; 2]) -> QuadUniforms {
+    let unit = frame[0].min(frame[1]);
+    let bounds = match image.fit {
+        Fit::Unit => [1.0, 1.0],
+        Fit::Frame => [frame[0] / unit, frame[1] / unit],
+    };
+    let (w, h) = (size[0].max(1) as f32, size[1].max(1) as f32);
+    let scale = (bounds[0] / w).min(bounds[1] / h) * image.size * 0.5;
+    QuadUniforms {
+        center: image.place,
+        half: [w * scale, h * scale],
+        alpha: image.alpha,
+        _pad: [0.0; 3],
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Presenter — the stage's one pass: the final signal, through the warp, onto
+// an output of some format.
+// ---------------------------------------------------------------------------
+
+struct Presenter {
+    pipeline: wgpu::RenderPipeline,
+    uniforms: wgpu::Buffer,
+    sampled: Sampled,
+    warp: Warp,
+    keep_alpha: bool,
+}
+
+impl Presenter {
+    fn new(engine: &Engine, format: wgpu::TextureFormat, keep_alpha: bool) -> Self {
+        let shader = engine
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("present.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/present.wgsl").into()),
+            });
+        Self {
+            pipeline: make_pipeline(
+                &engine.device,
+                &shader,
+                &[&engine.kit.sampled_layout],
+                format,
+                None,
+                "present pipeline",
+            ),
+            uniforms: uniform_buffer(
+                &engine.device,
+                &engine.queue,
+                "warp uniforms",
+                &WarpUniforms::zeroed(),
+            ),
+            sampled: Sampled::default(),
+            warp: Warp::default(),
+            keep_alpha,
+        }
+    }
+
+    /// Draws the engine's last node into `view`. Outside the warped quad the
+    /// output is black (or clear, when it keeps its alpha).
+    fn present(
+        &mut self,
+        engine: &Engine,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+    ) {
+        let clear = if self.keep_alpha {
+            wgpu::Color::TRANSPARENT
+        } else {
+            wgpu::Color::BLACK
+        };
+        let mut pass = begin_pass(encoder, view, "present pass", clear);
+        let Some(picture) = engine.nodes.last() else {
+            return;
+        };
+        let warp = WarpUniforms {
+            rows: self.warp.rows(),
+            feather: self.warp.feather,
+            keep_alpha: if self.keep_alpha { 1.0 } else { 0.0 },
+            _pad: [0.0; 2],
+        };
+        engine
+            .queue
+            .write_buffer(&self.uniforms, 0, bytemuck::bytes_of(&warp));
+        let bg = self
+            .sampled
+            .of(&engine.device, &engine.kit, picture, &self.uniforms);
+        pass.set_pipeline(&self.pipeline);
+        pass.set_bind_group(0, bg, &[]);
+        pass.draw(0..6, 0..1);
+    }
+}
+
+/// Brings up a device. With a `surface` the adapter is one that can present to
+/// it; without, any adapter will do (headless).
+async fn request_device(
+    instance: &wgpu::Instance,
+    surface: Option<&wgpu::Surface<'_>>,
+) -> (wgpu::Adapter, wgpu::Device, wgpu::Queue) {
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions {
+            power_preference: wgpu::PowerPreference::HighPerformance,
+            compatible_surface: surface,
+            force_fallback_adapter: false,
+            apply_limit_buckets: false,
+        })
+        .await
+        .expect("no compatible GPU adapter");
+    let (device, queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor {
+            label: Some("vybe device"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            memory_hints: wgpu::MemoryHints::default(),
+            trace: wgpu::Trace::Off,
+        })
+        .await
+        .expect("failed to request device");
+    (adapter, device, queue)
 }
 
 // ---------------------------------------------------------------------------
@@ -572,30 +1231,16 @@ pub(crate) struct OverlayFrame<'a> {
 }
 
 // ---------------------------------------------------------------------------
-// State — the window's GPU context plus the per-recipe passes.
+// State — the engine, presenting to a window.
 // ---------------------------------------------------------------------------
 
 pub(crate) struct State {
     pub(crate) window: Arc<Window>,
     surface: wgpu::Surface<'static>,
-    device: wgpu::Device,
-    queue: wgpu::Queue,
     config: wgpu::SurfaceConfiguration,
-
-    frame_uniforms: wgpu::Buffer,
-    frame_bg: wgpu::BindGroup,
-    passes: Passes,
+    engine: Engine,
+    presenter: Presenter,
     overlay: Option<Box<dyn Overlay>>,
-
-    // Kept so a live sketch can rebuild its passes when the recipe changes.
-    shape_shader: wgpu::ShaderModule,
-    frame_layout: wgpu::BindGroupLayout,
-    stroke_layout: wgpu::BindGroupLayout,
-
-    /// Mouse in scene space. Starts far away so nothing reacts before the
-    /// cursor first enters the window.
-    mouse: [f32; 2],
-    clock: Clock,
 }
 
 impl State {
@@ -605,28 +1250,7 @@ impl State {
 
         let instance = wgpu::Instance::default();
         let surface = instance.create_surface(window.clone()).unwrap();
-
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                power_preference: wgpu::PowerPreference::HighPerformance,
-                compatible_surface: Some(&surface),
-                force_fallback_adapter: false,
-                apply_limit_buckets: false,
-            })
-            .await
-            .expect("no compatible GPU adapter");
-
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("vybe device"),
-                required_features: wgpu::Features::empty(),
-                required_limits: wgpu::Limits::default(),
-                experimental_features: wgpu::ExperimentalFeatures::disabled(),
-                memory_hints: wgpu::MemoryHints::default(),
-                trace: wgpu::Trace::Off,
-            })
-            .await
-            .expect("failed to request device");
+        let (adapter, device, queue) = request_device(&instance, Some(&surface)).await;
 
         // Configure the window's swapchain.
         let caps = surface.get_capabilities(&adapter);
@@ -649,64 +1273,17 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        // The frame block: one small buffer shared by every pass (group 0).
-        let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("frame bind group layout"),
-            entries: &[uniform_entry(0)],
-        });
-        let frame_uniforms = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("frame uniforms"),
-            size: std::mem::size_of::<FrameUniforms>() as u64,
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-        let frame_bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("frame bind group"),
-            layout: &frame_layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: frame_uniforms.as_entire_binding(),
-            }],
-        });
-
-        // Shape pipeline pieces — both recipe kinds draw geometry.
-        let shape_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("shape.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/shape.wgsl").into()),
-        });
-        let stroke_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("stroke bind group layout"),
-            entries: &[uniform_entry(0)],
-        });
-
-        let passes = build_passes(
-            &device,
-            &queue,
-            &shape_shader,
-            &frame_layout,
-            &frame_uniforms,
-            &stroke_layout,
-            format,
-            width,
-            height,
-            recipe,
-        );
+        let mut engine = Engine::new(device, queue, width, height);
+        engine.set_recipe(recipe);
+        let presenter = Presenter::new(&engine, format, false);
 
         Self {
             window,
             surface,
-            device,
-            queue,
             config,
-            frame_uniforms,
-            frame_bg,
-            passes,
+            engine,
+            presenter,
             overlay: None,
-            shape_shader,
-            frame_layout,
-            stroke_layout,
-            mouse: [1e9, 1e9], // far away: at rest until the cursor shows up
-            clock: Clock::new(),
         }
     }
 
@@ -718,7 +1295,7 @@ impl State {
 
     #[cfg_attr(not(feature = "tweak"), allow(dead_code))]
     pub(crate) fn device(&self) -> &wgpu::Device {
-        &self.device
+        &self.engine.device
     }
 
     #[cfg_attr(not(feature = "tweak"), allow(dead_code))]
@@ -735,61 +1312,12 @@ impl State {
         }
     }
 
-    /// Replaces the running recipe — the live-sketch seam. Same shape of
-    /// recipe: only the knob values move (cheap, every slider tick). A
-    /// structural change (a live sketch may branch into another kind)
-    /// rebuilds the passes.
-    pub(crate) fn set_recipe(&mut self, recipe: Recipe) {
-        let recipe = match (&mut self.passes, recipe) {
-            (Passes::Shapes(shapes), Recipe::Shapes(strokes)) => {
-                shapes.replace(&self.device, &self.stroke_layout, strokes);
-                return;
-            }
-            (
-                Passes::Feedback {
-                    shapes,
-                    swirl_uniforms,
-                    ..
-                },
-                Recipe::Feedback { source, swirl },
-            ) => {
-                shapes.replace(&self.device, &self.stroke_layout, source);
-                self.queue.write_buffer(
-                    swirl_uniforms,
-                    0,
-                    bytemuck::bytes_of(&SwirlUniforms {
-                        decay: swirl.decay,
-                        angle: swirl.angle,
-                        scale: swirl.scale,
-                        _pad: 0.0,
-                    }),
-                );
-                return;
-            }
-            // Same-size cloud: only the forces changed (a tuned knob) — rewrite
-            // the tiny force uniform and keep the particles' live positions.
-            (Passes::Points(points), Recipe::Points { count, forces }) if points.count == count => {
-                self.queue.write_buffer(
-                    &points.forces_uniforms,
-                    0,
-                    bytemuck::bytes_of(&encode_forces(&forces)),
-                );
-                return;
-            }
-            (_, recipe) => recipe,
-        };
-        self.passes = build_passes(
-            &self.device,
-            &self.queue,
-            &self.shape_shader,
-            &self.frame_layout,
-            &self.frame_uniforms,
-            &self.stroke_layout,
-            self.config.format,
-            self.config.width,
-            self.config.height,
-            recipe,
-        );
+    pub(crate) fn engine(&mut self) -> &mut Engine {
+        &mut self.engine
+    }
+
+    pub(crate) fn set_warp(&mut self, warp: Warp) {
+        self.presenter.warp = warp;
     }
 
     pub(crate) fn resize(&mut self, size: winit::dpi::PhysicalSize<u32>) {
@@ -798,85 +1326,37 @@ impl State {
         }
         self.config.width = size.width;
         self.config.height = size.height;
-        self.surface.configure(&self.device, &self.config);
-        // Only the offscreen signal textures are size-dependent; shape passes
-        // own nothing sized. Rebuild them (the trail is lost then; fine for now).
-        match &mut self.passes {
-            Passes::Feedback {
-                feedback_layout,
-                present_layout,
-                swirl_uniforms,
-                sampler,
-                targets,
-                ..
-            } => {
-                *targets = build_feedback_targets(
-                    &self.device,
-                    size.width,
-                    size.height,
-                    sampler,
-                    swirl_uniforms,
-                    feedback_layout,
-                    present_layout,
-                );
-            }
-            Passes::Composite(Composite {
-                layers,
-                present_layout,
-                feedback_layout,
-                sampler,
-                ..
-            }) => {
-                for layer in layers.iter_mut() {
-                    layer.resize(
-                        &self.device,
-                        present_layout,
-                        feedback_layout,
-                        sampler,
-                        size.width,
-                        size.height,
-                    );
-                }
-            }
-            Passes::Shapes(_) | Passes::Points(_) => {}
-        }
+        self.surface.configure(&self.engine.device, &self.config);
+        self.engine.resize(size.width, size.height);
     }
 
-    /// Pixels (y-down, origin top-left) -> scene space (y-up, centered, the
-    /// shorter edge spanning -0.5..+0.5). The sketch never sees a pixel.
-    pub(crate) fn set_mouse(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
-        let (w, h) = (self.config.width as f32, self.config.height as f32);
-        let unit = w.min(h);
-        self.mouse = [
-            (position.x as f32 - w * 0.5) / unit,
-            (h * 0.5 - position.y as f32) / unit,
-        ];
+    /// The pointer moved: returns where, in scene space, and feeds the mouse
+    /// signal unless `hold` (an overlay owns the pointer right now).
+    pub(crate) fn pointer(
+        &mut self,
+        position: winit::dpi::PhysicalPosition<f64>,
+        hold: bool,
+    ) -> [f32; 2] {
+        let scene = self.engine.to_scene(position.x as f32, position.y as f32);
+        if !hold {
+            self.engine.mouse = scene;
+        }
+        scene
     }
 
     /// The mouse signal at rest: far away, so proximity effects go quiet when
     /// the cursor leaves the window (matches the start-up state).
     pub(crate) fn rest_mouse(&mut self) {
-        self.mouse = [1e9, 1e9];
+        self.engine.mouse = [1e9, 1e9];
     }
 
-    pub(crate) fn render(&mut self) {
-        let (time, dt) = self.clock.tick();
-        let u = FrameUniforms {
-            resolution: [self.config.width as f32, self.config.height as f32],
-            mouse: self.mouse,
-            time,
-            dt,
-            _pad: [0.0; 2],
-        };
-        self.queue
-            .write_buffer(&self.frame_uniforms, 0, bytemuck::bytes_of(&u));
-
+    pub(crate) fn render(&mut self, time: f32, dt: f32) {
         use wgpu::CurrentSurfaceTexture::*;
         let frame = match self.surface.get_current_texture() {
             Success(f) | Suboptimal(f) => f,
             // Swapchain out of date (e.g. during resize) or unavailable — skip the frame.
             Outdated | Lost => {
-                self.surface.configure(&self.device, &self.config);
+                self.surface.configure(&self.engine.device, &self.config);
                 return;
             }
             Timeout | Occluded | Validation => return,
@@ -884,81 +1364,21 @@ impl State {
         let screen = frame
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("frame"),
-            });
+        let mut encoder =
+            self.engine
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("frame"),
+                });
 
-        match &mut self.passes {
-            Passes::Shapes(shapes) => {
-                shapes.refresh(&self.queue); // knobs are live
-                let mut pass = begin_pass(&mut encoder, &screen, "shapes pass");
-                shapes.draw(&mut pass, &self.frame_bg);
-            }
-            Passes::Feedback {
-                shapes,
-                feedback_pipeline,
-                present_pipeline,
-                targets,
-                ..
-            } => {
-                shapes.refresh(&self.queue); // knobs are live
-                // Pass 1: the chain's geometry -> the source signal.
-                {
-                    let mut pass = begin_pass(&mut encoder, &targets.source, "source pass");
-                    shapes.draw(&mut pass, &self.frame_bg);
-                }
-                // Pass 2: swirl(previous) + source -> the next signal.
-                {
-                    let mut pass =
-                        begin_pass(&mut encoder, targets.ping_pong.write(), "feedback pass");
-                    pass.set_pipeline(feedback_pipeline);
-                    pass.set_bind_group(0, &self.frame_bg, &[]);
-                    pass.set_bind_group(1, &targets.feedback_bgs[targets.ping_pong.front], &[]);
-                    pass.draw(0..3, 0..1); // fullscreen triangle
-                }
-                // Pass 3: present the freshly written signal to the window.
-                {
-                    let mut pass = begin_pass(&mut encoder, &screen, "present pass");
-                    pass.set_pipeline(present_pipeline);
-                    pass.set_bind_group(0, &targets.present_bgs[1 - targets.ping_pong.front], &[]);
-                    pass.draw(0..3, 0..1);
-                }
-                // Swap: what we wrote becomes next frame's "previous".
-                targets.ping_pong.swap();
-            }
-            Passes::Points(points) => {
-                points.render(&mut encoder, &screen, &self.frame_bg, wgpu::Color::BLACK);
-            }
-            Passes::Composite(comp) => {
-                // Each layer renders its own world into its offscreen texture(s).
-                for layer in &comp.layers {
-                    layer.render(&mut encoder, &self.queue, &self.frame_bg);
-                }
-                // One pass draws the layers onto the screen, bottom to top —
-                // the compositor is composite.wgsl, each layer drawn with the
-                // pipeline for its own blend (over by alpha, or additive glow).
-                {
-                    let mut pass = begin_pass(&mut encoder, &screen, "composite pass");
-                    for layer in &comp.layers {
-                        pass.set_pipeline(comp.pipeline_for(layer.blend()));
-                        pass.set_bind_group(0, layer.composite_bg(), &[]);
-                        pass.draw(0..3, 0..1); // fullscreen triangle
-                    }
-                }
-                // Advance each feedback layer's ping-pong for next frame.
-                for layer in &mut comp.layers {
-                    layer.swap();
-                }
-            }
-        }
+        self.engine.render(&mut encoder, time, dt);
+        self.presenter.present(&self.engine, &mut encoder, &screen);
 
         // The overlay (if any) draws last, over the finished frame.
         if let Some(overlay) = &mut self.overlay {
             overlay.frame(OverlayFrame {
-                device: &self.device,
-                queue: &self.queue,
+                device: &self.engine.device,
+                queue: &self.engine.queue,
                 encoder: &mut encoder,
                 view: &screen,
                 size_px: [self.config.width, self.config.height],
@@ -966,8 +1386,145 @@ impl State {
             });
         }
 
-        self.queue.submit(Some(encoder.finish()));
-        self.queue.present(frame);
+        self.engine.queue.submit(Some(encoder.finish()));
+        self.engine.queue.present(frame);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Headless — the engine, presenting to a frame that can be read back. No
+// window, no surface: what `vybe render` and the pixel-diff tests stand on.
+// ---------------------------------------------------------------------------
+
+pub(crate) struct Headless {
+    engine: Engine,
+    presenter: Presenter,
+    frame: wgpu::Texture,
+    view: wgpu::TextureView,
+    readback: wgpu::Buffer,
+    /// Row stride of the readback buffer (wgpu aligns copies to 256 bytes).
+    stride: u32,
+}
+
+impl Headless {
+    /// `keep_alpha`: frames keep their transparency (a PNG sequence another
+    /// patch will layer) instead of landing on black.
+    pub(crate) fn new(width: u32, height: u32, keep_alpha: bool) -> Self {
+        let (width, height) = (width.max(1), height.max(1));
+        let instance = wgpu::Instance::default();
+        let (_, device, queue) = pollster::block_on(request_device(&instance, None));
+
+        let frame = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("headless frame"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: CAPTURE_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let stride = (4 * width).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("headless readback"),
+            size: u64::from(stride) * u64::from(height),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let engine = Engine::new(device, queue, width, height);
+        let presenter = Presenter::new(&engine, CAPTURE_FORMAT, keep_alpha);
+        Self {
+            view: frame.create_view(&wgpu::TextureViewDescriptor::default()),
+            frame,
+            engine,
+            presenter,
+            readback,
+            stride,
+        }
+    }
+
+    pub(crate) fn engine(&mut self) -> &mut Engine {
+        &mut self.engine
+    }
+
+    pub(crate) fn set_warp(&mut self, warp: Warp) {
+        self.presenter.warp = warp;
+    }
+
+    /// Renders the frame at `time`; with `capture`, reads it back. Every frame
+    /// must be rendered even when only some are kept — a feedback loop is the
+    /// sum of its past.
+    pub(crate) fn render(&mut self, time: f32, dt: f32, capture: bool) -> Option<Pixels> {
+        let (width, height) = (self.engine.width, self.engine.height);
+        let mut encoder =
+            self.engine
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("headless frame"),
+                });
+        self.engine.render(&mut encoder, time, dt);
+        self.presenter
+            .present(&self.engine, &mut encoder, &self.view);
+        if capture {
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.frame,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &self.readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(self.stride),
+                        rows_per_image: Some(height),
+                    },
+                },
+                wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        self.engine.queue.submit(Some(encoder.finish()));
+        if !capture {
+            return None;
+        }
+
+        let slice = self.readback.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |result| {
+            result.expect("failed to map the readback buffer");
+        });
+        self.engine
+            .device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: None,
+            })
+            .expect("device lost while reading a frame back");
+        let rgba = {
+            let mapped = slice
+                .get_mapped_range()
+                .expect("readback buffer is not mapped");
+            mapped
+                .chunks_exact(self.stride as usize)
+                .flat_map(|row| &row[..4 * width as usize])
+                .copied()
+                .collect()
+        };
+        self.readback.unmap();
+        Some(Pixels {
+            width,
+            height,
+            rgba,
+        })
     }
 }
 
@@ -976,10 +1533,9 @@ impl State {
 // ---------------------------------------------------------------------------
 
 /// The point-cloud pass: a compute step over the particle buffer, then an
-/// instanced draw reading it. Self-contained (owns its buffers and pipelines)
-/// so it renders the same whether it targets the screen ([`Passes::Points`]) or
-/// a layer's offscreen texture ([`Layer::Points`]) — the rule that everything
-/// composes, made literal.
+/// instanced draw reading it. Self-contained (owns its buffers and pipelines),
+/// it renders into a signal texture like every other node — the rule that
+/// everything composes, made literal.
 struct PointsPass {
     compute_pipeline: wgpu::ComputePipeline,
     render_pipeline: wgpu::RenderPipeline,
@@ -1015,7 +1571,7 @@ impl PointsPass {
         }
         // Pass 2: draw the cloud, one instanced quad per particle.
         {
-            let mut pass = begin_pass_clear(encoder, target, "points pass", clear);
+            let mut pass = begin_pass(encoder, target, "points pass", clear);
             pass.set_pipeline(&self.render_pipeline);
             pass.set_bind_group(0, frame_bg, &[]);
             pass.set_bind_group(1, &self.render_particles_bg, &[]);
@@ -1024,8 +1580,7 @@ impl PointsPass {
     }
 }
 
-/// Build a [`PointsPass`] targeting `target_format` (the screen's, or a layer's
-/// `SIGNAL_FORMAT`). Seeds the buffer, wires the compute step and the instanced
+/// Build a [`PointsPass`] targeting `target_format`. Seeds the buffer, wires the compute step and the instanced
 /// draw. The draw is additive so the crowd glows within its own texture.
 #[allow(clippy::too_many_arguments)]
 fn build_points(
@@ -1187,173 +1742,6 @@ fn build_points(
     }
 }
 
-/// Builds the GPU passes for a recipe. Called at start-up and again by
-/// [`State::set_recipe`] when a live sketch changes the recipe's kind.
-#[allow(clippy::too_many_arguments)]
-fn build_passes(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    shape_shader: &wgpu::ShaderModule,
-    frame_layout: &wgpu::BindGroupLayout,
-    frame_uniforms: &wgpu::Buffer,
-    stroke_layout: &wgpu::BindGroupLayout,
-    surface_format: wgpu::TextureFormat,
-    width: u32,
-    height: u32,
-    recipe: Recipe,
-) -> Passes {
-    match recipe {
-        Recipe::Shapes(strokes) => {
-            let shapes = build_shape_pass(
-                device,
-                shape_shader,
-                frame_layout,
-                stroke_layout,
-                surface_format,
-                strokes,
-                "shape pipeline",
-            );
-            Passes::Shapes(shapes)
-        }
-        Recipe::Feedback { source, swirl } => {
-            // Pass 1: the same shape pipeline, but into the source signal.
-            let shapes = build_shape_pass(
-                device,
-                shape_shader,
-                frame_layout,
-                stroke_layout,
-                SIGNAL_FORMAT,
-                source,
-                "shape pipeline (source)",
-            );
-            let sampler = make_linear_clamp_sampler(device);
-            // The swirl knobs: written now, refreshed by the live seam.
-            let swirl_uniforms = make_swirl_uniforms(device, queue, swirl);
-
-            // Pass 2: feedback (reads previous + source, writes next).
-            let feedback_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("feedback.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/feedback.wgsl").into()),
-            });
-            let feedback_layout = feedback_bind_group_layout(device);
-            let feedback_pipeline = make_pipeline(
-                device,
-                &feedback_shader,
-                &[frame_layout, &feedback_layout],
-                SIGNAL_FORMAT,
-                None,
-                "feedback pipeline",
-            );
-
-            // Pass 3: present (signal -> swapchain).
-            let present_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("present.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/present.wgsl").into()),
-            });
-            let present_layout = present_bind_group_layout(device);
-            let present_pipeline = make_pipeline(
-                device,
-                &present_shader,
-                &[&present_layout],
-                surface_format,
-                None,
-                "present pipeline",
-            );
-
-            let targets = build_feedback_targets(
-                device,
-                width,
-                height,
-                &sampler,
-                &swirl_uniforms,
-                &feedback_layout,
-                &present_layout,
-            );
-
-            Passes::Feedback {
-                shapes,
-                feedback_pipeline,
-                feedback_layout,
-                present_pipeline,
-                present_layout,
-                swirl_uniforms,
-                sampler,
-                targets,
-            }
-        }
-        Recipe::Points { count, forces } => Passes::Points(build_points(
-            device,
-            queue,
-            frame_uniforms,
-            frame_layout,
-            surface_format,
-            count,
-            forces,
-        )),
-        Recipe::Composite(sub_layers) => {
-            // Pieces shared by every layer: one sampler, the two layouts a layer
-            // rebuilds on resize, and one compositor pipeline per blend mode
-            // (same shader, different blend state) so layers can mix modes.
-            let sampler = make_linear_clamp_sampler(device);
-            let present_layout = present_bind_group_layout(device);
-            let feedback_layout = feedback_bind_group_layout(device);
-
-            let composite_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("composite.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/composite.wgsl").into()),
-            });
-            let composite_pipeline = |blend, label| {
-                make_pipeline(
-                    device,
-                    &composite_shader,
-                    &[&present_layout],
-                    surface_format,
-                    Some(blend_state(blend)),
-                    label,
-                )
-            };
-            let add_pipeline = composite_pipeline(Blend::Add, "composite pipeline (add)");
-            let over_pipeline = composite_pipeline(Blend::Over, "composite pipeline (over)");
-
-            // The feedback shader is shared by every feedback layer.
-            let feedback_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("feedback.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("shaders/feedback.wgsl").into()),
-            });
-
-            let layers = sub_layers
-                .into_iter()
-                .map(|sub| {
-                    build_layer(
-                        device,
-                        queue,
-                        shape_shader,
-                        &feedback_shader,
-                        frame_layout,
-                        frame_uniforms,
-                        stroke_layout,
-                        &feedback_layout,
-                        &present_layout,
-                        &sampler,
-                        width,
-                        height,
-                        sub,
-                    )
-                })
-                .collect();
-
-            Passes::Composite(Composite {
-                layers,
-                add_pipeline,
-                over_pipeline,
-                present_layout,
-                feedback_layout,
-                sampler,
-            })
-        }
-    }
-}
-
 /// One uniform buffer + bind group per stroke. Values arrive via
 /// [`ShapePass::refresh`], every frame.
 fn build_strokes(
@@ -1382,36 +1770,7 @@ fn build_strokes(
         .collect()
 }
 
-/// A shape pass targeting `target_format`: the instanced-circle pipeline plus
-/// one uniform buffer/bind-group per stroke. The screen path, the feedback
-/// source, and every composite layer all build their geometry through this.
-fn build_shape_pass(
-    device: &wgpu::Device,
-    shape_shader: &wgpu::ShaderModule,
-    frame_layout: &wgpu::BindGroupLayout,
-    stroke_layout: &wgpu::BindGroupLayout,
-    target_format: wgpu::TextureFormat,
-    strokes: Vec<Stroke>,
-    label: &str,
-) -> ShapePass {
-    let pipeline = make_pipeline(
-        device,
-        shape_shader,
-        &[frame_layout, stroke_layout],
-        target_format,
-        // The SDF circle's anti-aliased rim needs alpha blending.
-        Some(wgpu::BlendState::ALPHA_BLENDING),
-        label,
-    );
-    let draws = build_strokes(device, stroke_layout, strokes.len());
-    ShapePass {
-        pipeline,
-        strokes,
-        draws,
-    }
-}
-
-/// The linear-clamp sampler shared by the feedback and present/composite passes.
+/// The linear-clamp sampler shared by every pass that samples a signal.
 fn make_linear_clamp_sampler(device: &wgpu::Device) -> wgpu::Sampler {
     device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("linear clamp"),
@@ -1438,9 +1797,9 @@ fn additive_blend() -> wgpu::BlendState {
     }
 }
 
-/// The compositor's blend state for a stack's [`Blend`] mode. Layer textures
-/// are premultiplied (geometry drawn with alpha onto transparent black), which
-/// is what lets `over` read straight off them: `src + dst*(1 - src.a)`.
+/// The compositor's blend state for a [`Blend`] mode. Signal textures are
+/// premultiplied (geometry drawn with alpha onto transparent black), which is
+/// what lets `over` read straight off them: `src + dst*(1 - src.a)`.
 fn blend_state(blend: Blend) -> wgpu::BlendState {
     match blend {
         Blend::Add => additive_blend(),
@@ -1458,58 +1817,42 @@ fn blend_state(blend: Blend) -> wgpu::BlendState {
     }
 }
 
-/// The swirl knobs buffer, written once (the live seam refreshes it later).
-fn make_swirl_uniforms(device: &wgpu::Device, queue: &wgpu::Queue, swirl: Swirl) -> wgpu::Buffer {
+/// A small uniform buffer holding `value`, rewritable later.
+fn uniform_buffer<T: bytemuck::Pod>(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    label: &str,
+    value: &T,
+) -> wgpu::Buffer {
     let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("swirl uniforms"),
-        size: std::mem::size_of::<SwirlUniforms>() as u64,
+        label: Some(label),
+        size: std::mem::size_of::<T>() as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
-    queue.write_buffer(
-        &buffer,
-        0,
-        bytemuck::bytes_of(&SwirlUniforms {
-            decay: swirl.decay,
-            angle: swirl.angle,
-            scale: swirl.scale,
-            _pad: 0.0,
-        }),
-    );
+    queue.write_buffer(&buffer, 0, bytemuck::bytes_of(value));
     buffer
 }
 
-/// group(1) layout of the feedback pass: the swirl knobs, the previous signal,
-/// a sampler, and the source signal.
-fn feedback_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
+/// The layout of everything that samples a signal: the texture, its sampler,
+/// and one small uniform block (a layer's opacity, an image's quad, the warp).
+fn sampled_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
     device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("feedback bind group layout"),
-        entries: &[
-            uniform_entry(0),
-            texture_entry(1),
-            sampler_entry(2),
-            texture_entry(3),
-        ],
+        label: Some("sampled bind group layout"),
+        entries: &[texture_entry(0), sampler_entry(1), uniform_entry(2)],
     })
 }
 
-/// The present/composite layout: a signal texture + its sampler.
-fn present_bind_group_layout(device: &wgpu::Device) -> wgpu::BindGroupLayout {
-    device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-        label: Some("present bind group layout"),
-        entries: &[texture_entry(0), sampler_entry(1)],
-    })
-}
-
-/// A present/composite bind group: sample `view` through `sampler`.
-fn present_bind_group(
+/// Sample `view` through `sampler`, with `uniforms` beside it.
+fn sampled_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     view: &wgpu::TextureView,
     sampler: &wgpu::Sampler,
+    uniforms: &wgpu::Buffer,
 ) -> wgpu::BindGroup {
     device.create_bind_group(&wgpu::BindGroupDescriptor {
-        label: Some("present bind group"),
+        label: Some("sampled bind group"),
         layout,
         entries: &[
             wgpu::BindGroupEntry {
@@ -1520,122 +1863,22 @@ fn present_bind_group(
                 binding: 1,
                 resource: wgpu::BindingResource::Sampler(sampler),
             },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: uniforms.as_entire_binding(),
+            },
         ],
     })
-}
-
-/// Build one composite [`Layer`] from its sub-recipe: geometry (`Shapes`),
-/// feedback, or a point cloud (`Points`) — the three signal types, each
-/// composable. Anything else renders as an empty (black) geometry layer.
-#[allow(clippy::too_many_arguments)]
-fn build_layer(
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    shape_shader: &wgpu::ShaderModule,
-    feedback_shader: &wgpu::ShaderModule,
-    frame_layout: &wgpu::BindGroupLayout,
-    frame_uniforms: &wgpu::Buffer,
-    stroke_layout: &wgpu::BindGroupLayout,
-    feedback_layout: &wgpu::BindGroupLayout,
-    present_layout: &wgpu::BindGroupLayout,
-    sampler: &wgpu::Sampler,
-    width: u32,
-    height: u32,
-    layer: CompositeLayer,
-) -> Layer {
-    let CompositeLayer { recipe, blend } = layer;
-    match recipe {
-        Recipe::Points { count, forces } => {
-            let pass = build_points(
-                device,
-                queue,
-                frame_uniforms,
-                frame_layout,
-                SIGNAL_FORMAT,
-                count,
-                forces,
-            );
-            let target = make_signal_texture(device, width, height, "layer points target");
-            let composite_bg = present_bind_group(device, present_layout, &target, sampler);
-            Layer::Points(Box::new(PointsLayer {
-                pass,
-                target,
-                composite_bg,
-                blend,
-            }))
-        }
-        Recipe::Feedback { source, swirl } => {
-            let shapes = build_shape_pass(
-                device,
-                shape_shader,
-                frame_layout,
-                stroke_layout,
-                SIGNAL_FORMAT,
-                source,
-                "layer shape pipeline (source)",
-            );
-            let swirl_uniforms = make_swirl_uniforms(device, queue, swirl);
-            let feedback_pipeline = make_pipeline(
-                device,
-                feedback_shader,
-                &[frame_layout, feedback_layout],
-                SIGNAL_FORMAT,
-                None,
-                "layer feedback pipeline",
-            );
-            let targets = build_feedback_targets(
-                device,
-                width,
-                height,
-                sampler,
-                &swirl_uniforms,
-                feedback_layout,
-                present_layout,
-            );
-            Layer::Feedback(Box::new(FeedbackLayer {
-                shapes,
-                feedback_pipeline,
-                swirl_uniforms,
-                targets,
-                blend,
-            }))
-        }
-        other => {
-            let strokes = match other {
-                Recipe::Shapes(strokes) => strokes,
-                _ => Vec::new(),
-            };
-            let shapes = build_shape_pass(
-                device,
-                shape_shader,
-                frame_layout,
-                stroke_layout,
-                SIGNAL_FORMAT,
-                strokes,
-                "layer shape pipeline",
-            );
-            let target = make_signal_texture(device, width, height, "layer target");
-            let composite_bg = present_bind_group(device, present_layout, &target, sampler);
-            Layer::Shapes(ShapesLayer {
-                shapes,
-                target,
-                composite_bg,
-                blend,
-            })
-        }
-    }
 }
 
 /// The size-dependent feedback resources: source + ping-pong textures, and
 /// both sides' bind groups prebuilt (no per-frame allocation).
 fn build_feedback_targets(
     device: &wgpu::Device,
+    kit: &Kit,
     width: u32,
     height: u32,
-    sampler: &wgpu::Sampler,
     swirl_uniforms: &wgpu::Buffer,
-    feedback_layout: &wgpu::BindGroupLayout,
-    present_layout: &wgpu::BindGroupLayout,
 ) -> FeedbackTargets {
     let source = make_signal_texture(device, width, height, "source signal");
     let ping_pong = PingPong::new(device, width, height);
@@ -1643,7 +1886,7 @@ fn build_feedback_targets(
     let feedback_bg = |prev: &wgpu::TextureView| {
         device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("feedback bind group"),
-            layout: feedback_layout,
+            layout: &kit.feedback_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -1655,7 +1898,7 @@ fn build_feedback_targets(
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(sampler),
+                    resource: wgpu::BindingResource::Sampler(&kit.sampler),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
@@ -1664,23 +1907,15 @@ fn build_feedback_targets(
             ],
         })
     };
-    let present_bg =
-        |view: &wgpu::TextureView| present_bind_group(device, present_layout, view, sampler);
-
     let feedback_bgs = [
         feedback_bg(&ping_pong.views[0]),
         feedback_bg(&ping_pong.views[1]),
-    ];
-    let present_bgs = [
-        present_bg(&ping_pong.views[0]),
-        present_bg(&ping_pong.views[1]),
     ];
 
     FeedbackTargets {
         source,
         ping_pong,
         feedback_bgs,
-        present_bgs,
     }
 }
 
@@ -1711,19 +1946,10 @@ fn make_signal_texture(
 // wgpu boilerplate helpers — cut repetition, keep the core readable.
 // ---------------------------------------------------------------------------
 
-/// A render pass that clears to opaque black and draws into `view`.
+/// A render pass that clears `view` to `clear` and draws into it. Nodes clear
+/// to *transparent* black so their empty regions carry no coverage — that's
+/// what lets an `over` blend reveal the worlds beneath.
 fn begin_pass<'a>(
-    encoder: &'a mut wgpu::CommandEncoder,
-    view: &'a wgpu::TextureView,
-    label: &str,
-) -> wgpu::RenderPass<'a> {
-    begin_pass_clear(encoder, view, label, wgpu::Color::BLACK)
-}
-
-/// A render pass that clears `view` to `clear` and draws into it. Composite
-/// layers clear to *transparent* black so their empty regions carry no
-/// coverage — that's what lets an `over` blend reveal the worlds beneath.
-fn begin_pass_clear<'a>(
     encoder: &'a mut wgpu::CommandEncoder,
     view: &'a wgpu::TextureView,
     label: &str,

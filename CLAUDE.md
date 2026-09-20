@@ -33,41 +33,74 @@ settled decisions in [DECISIONS.md](docs/DECISIONS.md); what we intend to build 
 ## What this is (one breath)
 
 - Sovereign creative-coding engine, Rust + wgpu (WebGPU). One core, many
-  sugars (Rust now; TS/JS and Lua later). The chain syntax is the product.
+  front-ends. **The patch is the product; the chain is how it is born.**
+- A patch = a `.vy` file: one line per node, wires by name, scenes and
+  transitions, one output. Rust sugar and `.vy` are two front-ends over the
+  same core. Why: DECISIONS.md 2026-09-20.
 
-## We are in Phase 1
+## We are in 0.0.2 — "the patch runs on a laptop"
 
-- Phase 0 (feedback POC) proved the idea. Phase 1 brought, each pulled by a
-  kata: geometry (`Shape`), instancing, input-as-signal, the `.render()`
-  bridge (geometry → texture), and `layers()`.
-- Run any sketch: `cargo run --example <dots|feedback|feedback_trail|rainbow|rainbow_trails|osc>`
-- Point cloud (GPU particles + forces): `cargo run --example <particles|particles_galaxy|particles_swarm|particles_rain>`
+- The pulling kata is an installation: a projected cube (four faces,
+  a Raspberry Pi 5 per face, sensor-driven scenes). 0.0.3 puts it on the wall.
+- Run a sketch: `cargo run --example <dots|feedback|feedback_trail|rainbow|rainbow_trails|osc>`
+- Point cloud: `cargo run --example <particles|particles_galaxy|particles_swarm|particles_rain>`
 - Picked knobs, live: `cargo run --example <dots_tune|dots_tune_xy>` (examples always
   carry the panel via the self dev-dependency; the lib never does)
+- Run a patch: `cargo run -p vybe-cli -- run examples/patches/<name>/<name>.vy`
+  (`hello`, `trails`, `stack`, `scenes`, `calibration`, `remote-keystone`)
+- Two windows (face + remote): `… run examples/patches/calibration/calibration.vy`,
+  then `cargo run -p vybe-remote`
+- **Look at what you built — headless:**
+  - patch: `cargo run -p vybe-cli -- render x.vy --at 0s,2s --osc "/hands 1 @1s" --out frames/`
+  - any example: `VYBE_RENDER="at=2.5 size=500x500 out=frames" cargo run --example dots`
+  - fixed clock + scripted inputs = same pixels every run. Render, then read the PNG.
+- `cargo run -p vybe-cli -- check x.vy` before running; `… api` prints the vocabulary.
 - Layout — THE CORE is one module per architecture layer:
   - `src/sugar.rs` — the chains the artist writes (the Rust dialect).
-  - `src/recipe.rs` — the flattened chain (chain = AST), the Multi-Sugar seam.
+  - `src/patch/` — the `.vy` front-end: `parse` → `check` → `play` (the `Player`);
+    `vocabulary.rs` is the closed word list, as data.
+  - `src/objects.rs` — `Gate`, `Ramp`, `Fader`: behaviour, std-only, `dt`-driven.
+  - `src/recipe.rs` — what the core draws this frame; `Named` = key = identity.
   - `src/tune.rs` — named-knob registry (std-only; what front-ends turn).
-  - `src/gpu.rs` — all of wgpu, hidden behind the knobs; the Overlay seam.
-  - `src/shell.rs` — the winit window/input loop; live re-describe.
+  - `src/input.rs` — `Inputs` + `Binding`: THE seam integrations enter through.
+  - `src/stage.rs` — `Stage` builder, `Warp` (keystone), `Clock`, headless `Render`.
+  - `src/gpu.rs` — all of wgpu: a keyed node list + one present/warp pass.
+  - `src/shell.rs` — the winit window; events → the core's own `Event`.
+  - `src/media.rs` — PNG in/out (the core's only file format).
   - `src/tweak.rs` — the panel Overlay (feature `tweak`; egui, renderer ours).
   - `src/shaders/*.wgsl` — WGSL, embedded via `include_str!`.
-  - `examples/*.rs` — THE SKETCHES. Short, readable, only the visual.
+  - `examples/*.rs` — THE SKETCHES. `examples/patches/<name>/` — THE PATCHES.
+- Workspace — crates cut **by dependency, not by platform**:
+  - `crates/vybe-cli` (`vybe run|render|check|api`; clap)
+  - `crates/vybe-io` (OSC over UDP; rosc) · `crates/keystone` (the calibration
+    file; depends on nothing) · `crates/vybe-remote` (the OSC protocol, both
+    ends, + the remote sketch)
 - **Integrations enter through seams, never through the core**: one trait or
-  registry inside the engine; library glue behind it (feature/addon). No
-  `cfg` sprawl, no third-party types in core modules. Exposure is the
-  artist's choice (`tune()`), never reflection over everything.
+  registry inside the engine (`Binding`, `Overlay`, `tune`); library glue
+  behind it, in its own crate. No `cfg` sprawl, no third-party types in core
+  modules. Exposure is the artist's choice (`tune()`), never reflection.
 
-### Do NOT add (Phase 1 discipline)
+### The patch vocabulary is CLOSED
 
-- Interpreter/scripting (Lua, TS), WASM, node/graph systems, generic node
-  traits.
-- Point clouds — signal types enter **one at a time** (texture + geometry
-  exist today), each pulled by a sketch.
-- Blend modes, addons (svg/fonts/image/audio), generic material/effect
-  systems.
+- Twelve grammar rules (`vybe api`). Every thirteenth request gets `rust <name>`.
+- New words enter **only** as drawing primitives or Scalar operators, **only**
+  after existing in the Rust sugar first, **only** when a second work pulls them.
+- Never application nouns (`points`, `pick`, `nudge`…): that is a generic
+  binding over `tune`s, or an ordinary scene switched by an ordinary input.
+- A new word = one row in `patch/vocabulary.rs` (parser, checker, `api` follow).
+- A patch must not know which machine it runs on: stand-ins are CLI flags
+  (`--key space=/hands`) and fallbacks (`out kms` → window), never grammar.
+- Every diagnostic carries its next step (`did you mean`, the `ffmpeg` line).
+
+### Do NOT add (0.0.2 discipline)
+
+- Interpreter/scripting (Lua, TS), WASM, node/graph UI, `async` behaviour
+  scripts, a `scenes().edge()` DSL, ternaries in the grammar, mesh warp, HAP.
+- Pi-specific code: nothing is Pi-specific; `vybe-stage-drm` will run on any KMS.
+- Generic material/effect systems; blend modes beyond `over`/`add`.
 - UI in the core or default build — the feature-gated `tweak` panel is the
-  one sanctioned exception (a dev tool, never shipped by default).
+  one sanctioned exception. If the remote ever needs real widgets, wrap egui
+  behind the `tweak` seam; do not grow the engine into a toolkit.
 
 ## How the engine grows
 
@@ -107,6 +140,9 @@ settled decisions in [DECISIONS.md](docs/DECISIONS.md); what we intend to build 
   the boundary (present pass, mouse conversion). Why: DECISIONS.md.
 - **Toolchain pins:** wgpu `30`, winit `0.30`. Fast-moving APIs — check the
   crate source under `~/.cargo/registry`, don't guess from older docs.
-- **Every change ends runnable/visible.** Finish where the examples run.
+- **Every change ends runnable/visible.** Finish where the examples run — and
+  *look*: render headless and read the PNG. Rust/`.vy` twins: `cargo test --test
+  pairs -- --ignored` (needs a GPU) must stay byte-identical.
+- **Sketches end in `.show()`** — `live(|| …)` returns a `Stage` (`#[must_use]`).
 - **Keep sketches tiny.** A sketch needing more than the visual = the missing
   piece belongs in the core, behind a knob.

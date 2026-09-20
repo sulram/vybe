@@ -708,3 +708,166 @@ member the day a second project exists.
 **Housekeeping.** Publish a minimal `vybe 0.0.1` early: crates.io names are
 first-come and cannot be reserved without a publish, so claiming `cargo add
 vybe` before the name leaks is cheap insurance.
+
+---
+
+## 2026-09-20 — 0.0.2: the patch is the product; the chain is how it is born
+
+A design day (2026-09-19, recorded in the 0.0.2 design brief) that began as
+"which Raspberry Pi for a media player" ended as a new thesis. 0.0.1 said *the
+chain syntax is the product.* 0.0.2 says **the patch is the product; the chain
+is how it is born.** A patch is a plain-text file (`.vy`): one line per node,
+wires by name, scenes and transitions, one output. The first real work — a
+projected cube, four faces, sensor-driven scenes — is the kata that pulls
+it all: scenes, Scalars, keystone, headless render.
+
+**How we got there.** We wrote one cube face six ways. A declarative state
+machine (`scenes().edge().on()`) was elegant on paper and hard to debug. An
+`async` script (`show(x).until(gate).await`) read like a screenplay and was the
+worst to verify. Imperative-with-helpers (`Fader`, `Ramp`, `Gate`) was the best
+*Rust*. Then the question moved from "sugar for a person" to "sugar for an LLM",
+and the answer was not syntax at all: it was a **verification loop** (headless
+deterministic render, scripted inputs, static checks) plus a **closed, tiny
+vocabulary**. That is what a `.vy` is: the whole face in ~25 lines a human can
+read and a model cannot get wrong.
+
+**Principles adopted.**
+
+1. *One currency, many surfaces.* A `Signal` (texture over time) is the only
+   thing that crosses between modes; chains, patches and (later) imperative
+   sketches all produce and consume it.
+2. *Hydra outside, p5 inside, when needed.* Composition, time and transitions
+   are declarative. Whatever needs a `for` or a mutable list is a `rust <name>`
+   leaf returning a texture. Leaves never contain chains; chains never contain
+   closures.
+3. *Effects live in chains; behaviour lives in Rust; the bridge is a number or a
+   texture.* `Fader` never becomes a chain op; `feedback` never becomes a draw
+   call.
+4. *The vocabulary is closed.* Twelve grammar rules. Words enter only as drawing
+   primitives or Scalar operators — never as application nouns. (We caught
+   ourselves inventing `points`, `pick`, `nudge` for the keystone remote. The
+   correction: corners are `tune`s; "arrows nudge a tune" and "the mouse drags a
+   tune pair" are *generic bindings*; test patterns are ordinary scenes switched
+   by an ordinary input.)
+5. *Verifiable beats elegant.* For LLM authorship the product is `vybe render` +
+   `vybe check` + `vybe api`, not the syntax. Katas ship as `.rs`/`.vy` pairs,
+   rendered headless and compared pixel for pixel.
+
+**Rejected:** `async/until/await` as the behaviour model; the `scenes().edge()`
+DSL; a separate `vybepi` library (embedded support is crates in the same
+workspace, *cut by dependency, not by platform*); UI nouns in the grammar;
+ternaries in the grammar.
+
+This supersedes the Phase 1 "Do NOT add" list where they collide (a text
+front-end, an OSC integration, a CLI). What it does **not** supersede: examples
+pull features, integrations enter through seams, the core stays LLM-sized.
+
+### What the first implementation decided
+
+The brief settled the design with zero lines written. These are the judgment
+calls made while writing them — each one a place the brief was silent,
+ambiguous, or (twice) overruled.
+
+**Patch above Recipe, not instead of it.** The brief says "`Recipe` becomes
+serialisable; `.vy` is its text form." Built, it is two layers: the **`Patch`**
+is the AST (serialisable, holds Scalar *expressions*, scenes, transitions); the
+**`Recipe`** stays what the GPU draws *this frame*, with numbers. A **`Player`**
+sits between: each frame it moves its objects and emits a `Recipe` with this
+frame's Scalars resolved. This is `live()`'s seam, generalised — `live()`
+re-describes when a knob turns; a player re-describes every frame — so the
+GPU core learned nothing new about *time*. When the Rust sugar grows Scalars,
+it will build a `Patch` too; today's `Shape → Recipe` is the degenerate case.
+
+**Key = identity** (`Recipe::Named`). The brief's §3.3 ("state survives
+re-description; nodes are keyed by name") turned out to be the same decision as
+"what is a wire". A named node renders **once** per frame however many scenes
+reference it, and its GPU state (a feedback trail, a particle buffer) survives
+for as long as its name keeps appearing. Consequence worth the whole design: in
+the cube face, `idle` shows `ss` and `touch` shows `ss*(1-t)` — it is *the same* `ss`,
+so the cut between them is seamless, trail and all. Unnamed worlds are keyed by
+their path in the tree, which also closes an old ROADMAP debt for free: a
+`live()` composite no longer rebuilds wholesale when a knob turns.
+
+**One node list replaces `Passes` + `Layer`.** The GPU core had two parallel
+hierarchies (top-level `Passes`, per-layer `Layer`), each with its own
+feedback/points/shapes variant. Now a recipe flattens to one list of nodes in
+dependency order; each renders into its own signal texture; a mix node samples
+earlier ones; one present pass lands the last on the output. Costs one extra
+fullscreen pass for a bare circle. Buys: nested composition, per-layer opacity,
+headless output, and the keystone — all through the same path. Pipelines moved
+into a per-device `Kit` (they used to be rebuilt per layer).
+
+**The present pass *is* the keystone.** A 4-corner homography is exact for a
+flat face, so the warp is one quad whose vertex stage emits homogeneous
+coordinates (the GPU then interpolates perspective-correctly). At rest it is a
+plain copy. The `keystone` crate holds only the *file* (JSON, atomic save,
+`.bak`) and depends on nothing; the math lives with the pass, in the core's
+`stage`. *Known gap:* it warps the whole output, not a square `source` inside a
+16:10 `output` as the brief's file format anticipates — see ROADMAP.
+
+**Time semantics (the brief's risk #6), decided:** a *level* holds while its
+condition holds (`off`, `done`, `= N`); an *edge* is true for one update
+(`rise`). **A transition fires on the frame its whole condition *becomes* true
+while its `from` scene shows** — never again until it has been false. Pure
+levels were tried on paper and fail immediately: `* -> idle  mode = show` would
+pin the face to `idle` forever, because `/mode` still *reads* `show` long after
+the message arrived. Ramps are linear and clamped so they reach `0` and `1`
+*exactly* (`t = 1` is a condition you can build on); ease afterwards with
+`smooth(t)`. Objects advance by an explicit `dt` and never read a clock, so a
+fixed step replays a performance exactly.
+
+**A scene crossfade adds, it doesn't cover.** Scenes composite with `add` and
+weights summing to 1 — an exact dissolve whatever the scenes' own transparency.
+`over` would dip to dark mid-fade between two opaque scenes.
+
+**The patch is identical on the laptop and on the wall.** Two temptations
+refused, both grammar creep: a `key` source for the sensor stand-in, and an
+`out window` variant of every patch. Instead the window writes keys and mouse
+into the *same address space OSC lands in* (`/key/space`, `/mouse/x`), the CLI
+maps one onto the other (`vybe run face.vy --key space=/hands`), and `out kms …`
+falls back to a window of the same shape where there is no KMS. Nothing in a
+patch says which machine it is on.
+
+**Overruled: a node named after a word of the language.** The brief's own sample
+has `frames = frames transicao/*.png`, then `frames@smooth(t)`. That makes
+`frames` at the head of an item ambiguous between the wire and the source word —
+resolvable only by definition order, which is exactly the kind of rule a model
+gets wrong. Vocabulary words can't name nodes; the error says `rename it`. (The
+fixture uses `trans`.) Unambiguous beats faithful-to-the-sample.
+
+**Overruled: chumsky.** The grammar is twelve line-oriented rules. A hand-written
+parser keeps the core dependency-free and affords what a combinator can't:
+on-demand lexing (so `*` is a multiply in `ss*(1-t)` and a glob in
+`transicao/*.png` with neither needing quotes), every broken line reported in
+one pass, and errors that say what to write instead. The vocabulary is *data*
+(`patch/vocabulary.rs`): the parser, the checker's hints and `vybe api` all read
+the same tables, so they cannot drift.
+
+**One seam for every integration: `Binding`.** A binding sees window events and
+every frame, and may touch the `Inputs`, the `Warp`, and the `tune` registry.
+OSC (`vybe-io`), both ends of the remote protocol (`vybe-remote`), scripted
+inputs for headless runs, the CLI's key mapping, and the two generic bindings
+(`arrows_nudge`, `mouse_drag`) are all just implementations. The core never
+learns what a socket is. `tune` grew the front-end API they share
+(`get`/`set`/`names`).
+
+**`live()` returns a `Stage`; sketches end in `.show()`.** The brief writes the
+remote as `live(|| …).with(…).on(…).show()`, and there was nowhere to hang a
+binding on a function that opened the window and never returned. It is more
+coherent anyway — every sketch now ends on the same terminal link — but it is a
+breaking change with a silent failure mode (`live(|| …);` compiles and does
+nothing), so `Stage` is `#[must_use]` and CI's `-D warnings` makes that an
+error. Three examples gained one line each.
+
+**Deferred, and the checker says so rather than failing quietly:** `video`
+(GStreamer, 0.0.3 — the error prints the `ffmpeg` line that makes a PNG sequence
+instead), `text` and `rust` leaves (they arrive with `Draw`), audio (`mute`,
+`vol`, a transition's sound: parsed, noted, ignored), `vybe fmt`,
+`Recipe::to_vy()`, `vybe check --scenario`, mDNS discovery, `Param`
+persistence. Until `text` exists, the remote's status line lives in its window
+title.
+
+**Media renders itself.** The `remote-keystone` patch needs PNG sequences; they are
+produced by `vybe render` from two small generator patches
+(`examples/patches/remote-keystone/make-media.sh`), so the repo carries no binaries and
+the headless path is exercised by its first real user.

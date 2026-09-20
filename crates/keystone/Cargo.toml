@@ -1,0 +1,11 @@
+[package]
+name = "keystone"
+version = "0.0.2"
+edition = "2024"
+rust-version = "1.85"
+description = "A projector's 4-corner keystone as a file: load, edit, save atomically. No dependencies; usable outside vybe."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sulram/vybe"
+publish = false
+
+[dependencies]

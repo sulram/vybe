@@ -21,5 +21,6 @@ fn main() {
             .swirl(tune("swirl", 0.25, 0.0..=1.0)) // ambient rotation around center
             .repel(mouse(), tune("repel", 0.7, 0.0..=2.0)) // push from the cursor
             .orbit(mouse(), tune("orbit", 1.1, 0.0..=3.0)) // swirl around it
-    });
+    })
+    .show();
 }

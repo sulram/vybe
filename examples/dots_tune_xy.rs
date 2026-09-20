@@ -21,5 +21,6 @@ fn main() {
                 scale: tune("burst", 3.5, 0.0..=6.0),
             },
         )
-    });
+    })
+    .show();
 }

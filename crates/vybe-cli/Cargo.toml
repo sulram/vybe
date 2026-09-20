@@ -1,0 +1,19 @@
+[package]
+name = "vybe-cli"
+version = "0.0.2"
+edition = "2024"
+rust-version = "1.85"
+description = "The `vybe` command: run, render, check a .vy patch — the verification loop an author (human or model) closes alone."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sulram/vybe"
+publish = false
+
+[[bin]]
+name = "vybe"
+path = "src/main.rs"
+
+[dependencies]
+vybe = { path = "../.." }
+vybe-remote = { path = "../vybe-remote" }
+keystone = { path = "../keystone" }
+clap = { version = "4", features = ["derive"] }

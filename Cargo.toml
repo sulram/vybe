@@ -1,9 +1,15 @@
+# One workspace, crates cut by DEPENDENCY, not by platform (DECISIONS
+# 2026-09-20): the core stays wgpu + winit; whatever drags in a heavier or
+# stranger dependency (OSC, a CLI, a file format) is a crate beside it.
+[workspace]
+members = ["crates/*"]
+
 [package]
 name = "vybe"
-version = "0.0.1"
+version = "0.0.2"
 edition = "2024"
 rust-version = "1.85"
-description = "Sovereign creative-coding engine on Rust + wgpu (WebGPU) — one core, many sugars; the chain syntax is the product."
+description = "Sovereign creative-coding engine on Rust + wgpu (WebGPU) — one core, many front-ends; the patch is the product, the chain is how it is born."
 authors = ["Marlus Araujo <mar251@gmail.com>"]
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sulram/vybe"
@@ -18,6 +24,7 @@ wgpu = "30"
 winit = "0.30"
 pollster = "0.4"       # blocks on wgpu's async without pulling a whole runtime
 bytemuck = { version = "1", features = ["derive"] } # structs -> bytes for the GPU
+png = "0.18"           # frames() in, headless render out — the core's only file format
 
 # The tweak panel (feature-gated; zero cost in default builds). egui core is
 # pure math and egui-winit matches our winit; the RENDERER is ours (tweak.rs),

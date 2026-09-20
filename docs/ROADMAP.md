@@ -17,7 +17,75 @@ abandoned roadmap lies.
 
 ---
 
-## Now — the trial by fire
+## Now — 0.0.2: "the patch runs on a laptop"
+
+The thesis shifted (DECISIONS 2026-09-20): **the patch is the product.** The
+pulling kata is a projected cube installation; this section follows the order
+of the 0.0.2 design brief. Acceptance: `vybe render remote-keystone.vy --osc
+"/hands 1 @1s"` shows idle → touch → play on a Mac, no Pi, no GStreamer — **met**
+(`examples/patches/remote-keystone/`).
+
+- [x] `vybe render`: headless, fixed `Clock`, scripted inputs (`--osc`), PNG out;
+      identical across runs. Also `VYBE_RENDER=…` on any `.rs` example.
+- [x] GPU core as one keyed node list (replaces `Passes` + `Layer`); **key =
+      identity** — state survives re-description, a wire is one node.
+- [x] `Gate`, `Ramp`, `Fader` as std-only objects, unit-tested; time semantics
+      decided (edges vs levels; transitions fire on *becoming* true).
+- [x] Scalars in the patch: `osc /addr`, `osc hz amp`, `ramp`, `( expr )`,
+      `smooth()`; plug into any number socket.
+- [x] `.vy` parser (hand-written) + checker + `vybe run` + `vybe api`; the
+      vocabulary as data. Fixture: the brief's cube face parses whole.
+- [x] Scenes + transitions on `Fader`; crossfade = additive dissolve.
+- [x] `frames` from PNG (in-memory textures), played, looped, or scrubbed (`@`).
+- [x] New forms in both dialects: `rect`, `line`; `stroke`, `gray`, `alpha`.
+- [x] Keystone: the present pass is the warp; `keystone` crate (file, atomic
+      save); OSC protocol both ends (`vybe-remote`); **two windows on one Mac**.
+- [x] Keyboard + mouse as `Inputs`; `Binding` seam; `arrows_nudge`,
+      `mouse_drag`, `.on(Key)`, `key_cycle`. `live()` returns a `Stage`.
+- [x] Kata pairs `.rs`/`.vy` byte-identical (`tests/pairs.rs`, `--ignored`: GPU).
+- [ ] **Keystone `source` size**: render the face at its own size (1200²) and
+      warp *its* corners into the output (1920×1200). Today the warp pulls the
+      whole output's corners — calibrates fine, but the handles aren't the
+      square's. The brief's `keystone.json` already anticipates `source {w,h}`.
+- [ ] `Draw` + `canvas()` + `rust <name>` leaves; `text` (one embedded mono
+      font), `polygon`, `arc`. Kata: `canvas_ring` (the loading ring). Until
+      then the remote's status line lives in its window title.
+- [ ] `Scalar` in the Rust sugar (`tune()` returns one) — the sugar then builds a
+      `Patch`, and `Recipe::to_vy()` prints any chain as a patch.
+- [ ] `vybe check --scenario hands.toml`: 60 s of behaviour in a blink
+      (`Player::advance` already runs GPU-free) — scenes visited, dwell, stuck
+      fades. State bugs are invisible in a PNG and obvious here.
+- [ ] Hot reload of a running patch by node-name diff (the GPU half exists: it
+      *is* key = identity; missing: watch the file, swap the `Patch`, keep the
+      player's objects by name).
+- [ ] `vybe fmt` (canonical spacing, so patches diff cleanly); `vybe set`.
+- [ ] `Param`: a `tune` that persists (TOML) and is addressable as
+      `/param/<name>` (incoming is handled; persistence + announce are not).
+- [ ] `| feedback` over a composition (today: one shape), when a patch pulls it.
+- [ ] Pixel-pair CI needs a GPU runner (or lavapipe); today the pairs run locally.
+- [ ] Split `gpu.rs` (2 k lines — the core's biggest file): `gpu/points.rs` is a
+      clean cut. LLM-sized is a rule, not a wish.
+- [ ] Colour: `gray .5` is *linear* .5 (≈ 74 % on screen). Decide whether paint
+      knobs should be perceptual before a calibration pattern depends on it.
+
+## Next — 0.0.3: "the patch runs on the wall"
+
+- [ ] `vybe-stage-drm`: KMS/GBM shell, no window (`out kms` stops falling back).
+      Spike wgpu-on-KMS in `examples/` first — the brief's risk #1.
+- [ ] `vybe-video`: GStreamer HEVC (`v4l2h265dec`), DMA-BUF import behind a
+      feature, NV12 CPU-copy fallback. `video` stops being a checker error.
+- [ ] `vybe-audio` (`mute`, `vol`, a transition's sound), `vybe-io` GPIO.
+- [ ] mDNS `_vybe._tcp` discovery; the remote cycles faces (Alt ↑↓); MJPEG preview.
+- [ ] ASTC cache for `frames()` (~1 MB/frame instead of 9).
+- [ ] Half-resolution feedback as an option (fill rate on VideoCore VII).
+- [ ] The cube on four Pi 5 units.
+
+Consciously deferred: TS/Lua dialects, WASM, node-graph UI, `async` scripting,
+ternaries in the grammar, mesh warp, HAP (no S3TC on VideoCore — do not revisit).
+
+---
+
+## Before 0.0.2 — the trial by fire
 
 Two things stand between us and "the best creative-coding library in the
 world": the temporal model must be honest, and the third signal type
@@ -125,16 +193,18 @@ Each waits for the kata that pulls it (Golden Rule #2).
         blended add/over like any other (pulled by `layers_over`/`blend`). Extracted a
         reusable `PointsPass` (compute step + draw) that targets the screen or a
         layer's texture; `Layer` widened to a `World` sum (`Signal` | `Particles`).
-  - [ ] Live-tune a particle layer (`set_recipe` rebuilds a composite wholesale
-        today; a per-layer swap keeping the cloud's positions waits for a kata).
+  - [x] Live-tune a particle layer — closed for free by the keyed node list
+        (0.0.2): a re-described composite keeps every node whose key and kind
+        survive, so the cloud keeps its positions.
   - [ ] Particles into `.feedback()` — the cloud rendered to a signal texture
         that can source a feedback loop (trails of a swarm).
 - [ ] Particle colour: a hue/tint knob on `particles(..)` (points render white
       today) — needed the moment two clouds share a frame and must read apart.
-- [ ] SDF shape library: `rect`, `star`, … selected by index (the building-
-      block layer inside `shape.wgsl`), when a sketch pulls a non-circle.
-- [ ] First tests: pure logic that deserves them — `flatten()`, the `tune`
-      registry, the pixel→scene conversion. (Today: 0 tests.)
+- [x] SDF shape library, first step: `rect` (and `line`, a rect laid along two
+      points) selected by index inside `shape.wgsl`; outlines via `stroke`.
+      Pulled by the calibration grid. `star`, `arc`, `polygon` wait their turn.
+- [x] First tests: pure logic that deserves them. (0.0.2: 67 across the
+      workspace — objects, parser, checker, player, warp math, OSC, protocol.)
 - [ ] Texture-world effects as chained passes: `bloom`, `kaleid`, `blur` — the
       Hydra lineage, each a fullscreen pass (the texture-world composition
       model).
@@ -185,3 +255,12 @@ The katas that already pulled their features (the proof it sings).
 - [x] `layers_blend` — per-layer `world.blend(..)`: mixed modes in one stack (a
       particle swarm spells `add`, a disc rides the `over` default), worlds
       bound to lets then composed.
+
+Patches (`examples/patches/<name>/`), 0.0.2:
+
+- [x] `hello` — the smallest patch. `trails` — `|` into `feedback` (twin of the
+      `feedback` sketch, pixel for pixel). `stack` — `+ * add` and Scalars.
+- [x] `scenes` — scenes, transitions, a key as a gate.
+- [x] `calibration` — test patterns as scenes; the face the remote talks to.
+- [x] `remote-keystone` — the cube face, laptop edition: scenes + keystone +
+      remote in one patch; renders its own media.

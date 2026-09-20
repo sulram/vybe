@@ -1,0 +1,12 @@
+[package]
+name = "vybe-io"
+version = "0.0.2"
+edition = "2024"
+rust-version = "1.85"
+description = "vybe's doors to the outside: OSC in and out (GPIO later)."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sulram/vybe"
+publish = false
+
+[dependencies]
+rosc = "0.11"

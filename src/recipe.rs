@@ -1,17 +1,22 @@
-//! THE RECIPE — the flattened chain the sugar hands to the core.
+//! THE RECIPE — what the core draws, as plain data.
 //!
 //! This is "chain = AST" made literal: `a().b().c()` collapses into plain data
-//! here. Today it's a Rust enum; tomorrow it is the seam where the TS/Lua
-//! dialects and the node front-end plug in — every dialect, every front-end,
-//! one recipe.
+//! here. Two front-ends hand it over today — the Rust sugar (once, at the
+//! terminal link, or again whenever a knob turns) and the patch player (every
+//! frame, with this frame's Scalars already resolved to numbers). Every
+//! dialect, every front-end, one recipe.
+
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use crate::sugar::{Blend, Falloff, Hue, Osc, Swirl, Wave};
 
-/// What a chain describes, handed from the sugar to the core by a terminal
-/// link. One variant per chain kind that exists today.
+/// What a chain describes, handed from a front-end to the core. One variant
+/// per kind of world, plus the two that give a description *structure*:
+/// [`Recipe::Composite`] (a stack) and [`Recipe::Named`] (an identity).
 #[derive(Clone)]
 pub(crate) enum Recipe {
-    /// Geometry strokes drawn straight to the screen, in order.
+    /// Geometry strokes, drawn in order.
     Shapes(Vec<Stroke>),
     /// Geometry strokes rendered as the energy source of a feedback loop.
     Feedback { source: Vec<Stroke>, swirl: Swirl },
@@ -20,23 +25,55 @@ pub(crate) enum Recipe {
     /// `forces` are the behavior the sketch composed; the compute step applies
     /// them (a bounded, declarative vocabulary — not a general value-flow).
     Points { count: u32, forces: Vec<Force> },
+    /// One frame of an image sequence, placed in scene space.
+    Image(Image),
     /// A stack of worlds composited into one frame, bottom to top. Each
-    /// [`CompositeLayer`] is its own sub-recipe (some with feedback, some
-    /// without) rendered to an offscreen signal texture, plus how it blends onto
-    /// the worlds beneath it; the compositor combines them onto the screen. The
-    /// seam `layers()` reaches for when a stack mixes worlds or a layer asks to
+    /// [`CompositeLayer`] is its own sub-recipe rendered to its own signal
+    /// texture, plus how it lands on the worlds beneath it. The seam
+    /// `layers()` reaches for when a stack mixes worlds or a layer asks to
     /// *add* its light — a plain all-`over` stack of geometry stays one
     /// [`Recipe::Shapes`] (painter's-order alpha *is* over; the cheaper path).
     Composite(Vec<CompositeLayer>),
+    /// **Key = identity.** The wrapped world is *the* node of that name: it is
+    /// rendered once per frame however many times the name appears, and its GPU
+    /// state (a feedback trail, a particle buffer) survives re-description for
+    /// as long as the name keeps appearing. This is what makes a wire a wire.
+    Named(String, Box<Recipe>),
 }
 
-/// One layer of a [`Recipe::Composite`]: the world to render offscreen, and the
-/// [`Blend`] with which it lands on the worlds beneath it (resolved from the
-/// layer's own choice or the stack's default at flatten time).
+/// One layer of a [`Recipe::Composite`]: the world to render offscreen, the
+/// [`Blend`] with which it lands on the worlds beneath it, and its opacity.
 #[derive(Clone)]
 pub(crate) struct CompositeLayer {
     pub recipe: Recipe,
     pub blend: Blend,
+    /// `1.0` = as rendered. The whole cross-scene transition is this number.
+    pub alpha: f32,
+}
+
+/// One frame out of an image sequence. The sequence is shared (`Arc`) so a
+/// re-described recipe points at the same files and the core keeps its
+/// textures; only `index` moves.
+#[derive(Clone)]
+pub(crate) struct Image {
+    pub frames: Arc<[PathBuf]>,
+    pub index: usize,
+    pub fit: Fit,
+    /// Center, scene space.
+    pub place: [f32; 2],
+    /// Multiplies the fitted size.
+    pub size: f32,
+    pub alpha: f32,
+}
+
+/// What an image is fitted into (always contained, never cropped).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Fit {
+    /// The scene's unit square — the shorter screen edge. A square image
+    /// fills a square face.
+    Unit,
+    /// The whole frame, whatever its aspect.
+    Frame,
 }
 
 /// One force acting on every particle each frame — the composable behavior a
@@ -68,7 +105,9 @@ impl Recipe {
             Recipe::Shapes(_) => "vybe — shapes",
             Recipe::Feedback { .. } => "vybe — feedback",
             Recipe::Points { .. } => "vybe — particles",
+            Recipe::Image(_) => "vybe — image",
             Recipe::Composite(_) => "vybe — layers",
+            Recipe::Named(_, inner) => inner.title(),
         }
     }
 }
@@ -95,12 +134,26 @@ impl Source {
     };
 }
 
+/// The prototype a stroke stamps. A line is not a third form: it is a [`Form::Rect`]
+/// laid along its two points (see `sugar::line`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Form {
+    Circle,
+    Rect,
+}
+
 /// One flattened shape-chain — a single gesture: a prototype, its placement,
 /// motion, and paint. [`Stroke::IDENTITY`] is the resting state (Principle 2):
 /// one white circle, centered, still. Every link fills in only what it touches.
 #[derive(Clone, Copy)]
 pub(crate) struct Stroke {
+    pub form: Form,
+    /// Circle: the radius. As a fraction of the grid cell.
     pub radius: f32,
+    /// Rect: width and height. As a fraction of the grid cell.
+    pub extent: [f32; 2],
+    /// Rotation, radians, counter-clockwise.
+    pub angle: f32,
     pub cols: u32,
     pub rows: u32,
     /// Where the shape sits (the `at()` link).
@@ -111,13 +164,21 @@ pub(crate) struct Stroke {
     pub hue: Hue,
     /// 0 = white (unpainted), 1 = full hue. Set by the `hue()` link.
     pub sat: f32,
+    /// Brightness, 0 = black, 1 = full. Set by the `gray()` link.
+    pub value: f32,
+    pub alpha: f32,
     pub soft: f32,
+    /// Outline width in scene units, drawn inside the edge. 0 = filled.
+    pub outline: f32,
     pub falloff: Falloff,
 }
 
 impl Stroke {
     pub(crate) const IDENTITY: Self = Self {
+        form: Form::Circle,
         radius: 0.25,
+        extent: [0.5, 0.5],
+        angle: 0.0,
         cols: 1,
         rows: 1,
         place: Source::ORIGIN,
@@ -136,11 +197,29 @@ impl Stroke {
             drift: 0.0,
         },
         sat: 0.0,
+        value: 1.0,
+        alpha: 1.0,
         soft: 0.0,
+        outline: 0.0,
         falloff: Falloff {
             min: 0.0,
             max: 1.0,
             scale: 1.0,
         },
     };
+
+    /// A stroke from `a` to `b`, `width` thick: a rect laid along the segment.
+    pub(crate) fn line(a: [f32; 2], b: [f32; 2], width: f32) -> Self {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        Self {
+            form: Form::Rect,
+            extent: [dx.hypot(dy), width],
+            angle: dy.atan2(dx),
+            place: Source {
+                point: [(a[0] + b[0]) * 0.5, (a[1] + b[1]) * 0.5],
+                from_mouse: false,
+            },
+            ..Self::IDENTITY
+        }
+    }
 }

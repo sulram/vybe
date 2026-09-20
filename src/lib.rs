@@ -19,14 +19,21 @@
 //!   never reach a sketch.
 
 mod gpu;
+pub mod input;
+mod media;
+pub mod objects;
+pub mod patch;
 mod recipe;
 mod shell;
+pub mod stage;
 mod sugar;
 #[cfg(test)]
 mod tests;
-mod tune;
+pub mod tune;
 #[cfg(feature = "tweak")]
 mod tweak;
 
+pub use input::{Key, Rect, arrows_nudge, mouse_drag};
+pub use stage::Stage;
 pub use sugar::*;
-pub use tune::tune;
+pub use tune::{key_cycle, tune};
