@@ -186,7 +186,7 @@ impl Binding for OnKey {
 pub fn arrows_nudge(glob: &str) -> ArrowsNudge {
     ArrowsNudge {
         glob: glob.to_owned(),
-        step: [0.01, 0.01],
+        step: Box::new(|| (0.01, 0.01)),
         shift: 10.0,
         y_down: false,
     }
@@ -195,15 +195,21 @@ pub fn arrows_nudge(glob: &str) -> ArrowsNudge {
 /// See [`arrows_nudge`].
 pub struct ArrowsNudge {
     glob: String,
-    step: [f32; 2],
+    step: Box<dyn Fn() -> (f32, f32)>,
     shift: f32,
     y_down: bool,
 }
 
 impl ArrowsNudge {
     /// How far one press moves, per axis (default `0.01`).
-    pub fn step(mut self, x: f32, y: f32) -> Self {
-        self.step = [x, y];
+    pub fn step(self, x: f32, y: f32) -> Self {
+        self.step_with(move || (x, y))
+    }
+
+    /// Like [`ArrowsNudge::step`], asked at every press — for a step that
+    /// depends on something live (one pixel of an output whose size a tune holds).
+    pub fn step_with(mut self, step: impl Fn() -> (f32, f32) + 'static) -> Self {
+        self.step = Box::new(step);
         self
     }
 
@@ -233,11 +239,12 @@ impl Binding for ArrowsNudge {
             return;
         };
         let up = if self.y_down { -1.0 } else { 1.0 };
+        let (step_x, step_y) = (self.step)();
         let (axis, delta) = match key {
-            Key::Left => ("/x", -self.step[0]),
-            Key::Right => ("/x", self.step[0]),
-            Key::Up => ("/y", up * self.step[1]),
-            Key::Down => ("/y", -up * self.step[1]),
+            Key::Left => ("/x", -step_x),
+            Key::Right => ("/x", step_x),
+            Key::Up => ("/y", up * step_y),
+            Key::Down => ("/y", -up * step_y),
             _ => return,
         };
         let delta = if *shift { delta * self.shift } else { delta };
@@ -275,6 +282,17 @@ impl Rect {
         self
     }
 
+    /// The largest box of `aspect` (width / height) contained in this one,
+    /// sharing its center.
+    pub fn fit(&self, aspect: f32) -> Self {
+        let aspect = if aspect > 0.0 { aspect } else { 1.0 };
+        let width = self.size[0].min(self.size[1] * aspect);
+        Self {
+            center: self.center,
+            size: [width, width / aspect],
+        }
+    }
+
     /// Fraction of the box -> scene space.
     pub fn map(&self, (u, v): (f32, f32)) -> (f32, f32) {
         (
@@ -309,7 +327,7 @@ pub fn mouse_drag(glob: &str, radius: f32) -> MouseDrag {
 pub struct MouseDrag {
     glob: String,
     radius: f32,
-    within: Option<Rect>,
+    within: Option<Box<dyn Fn() -> Rect>>,
     selects: Option<String>,
     /// The prefix of the pair being dragged.
     held: Option<String>,
@@ -317,8 +335,14 @@ pub struct MouseDrag {
 
 impl MouseDrag {
     /// The tunes are fractions of `rect` (y-down) rather than scene positions.
-    pub fn within(mut self, rect: Rect) -> Self {
-        self.within = Some(rect);
+    pub fn within(self, rect: Rect) -> Self {
+        self.within_with(move || rect)
+    }
+
+    /// Like [`MouseDrag::within`], asked at every event — for a box whose shape
+    /// depends on something live.
+    pub fn within_with(mut self, rect: impl Fn() -> Rect + 'static) -> Self {
+        self.within = Some(Box::new(rect));
         self
     }
 
@@ -343,7 +367,7 @@ impl MouseDrag {
     }
 
     fn to_scene(&self, point: (f32, f32)) -> (f32, f32) {
-        self.within.map_or(point, |rect| rect.map(point))
+        self.within.as_ref().map_or(point, |rect| rect().map(point))
     }
 }
 
@@ -374,7 +398,10 @@ impl Binding for MouseDrag {
             Event::Pointer { at } => {
                 if let Some(prefix) = &self.held {
                     let point = (at[0], at[1]);
-                    let (x, y) = self.within.map_or(point, |rect| rect.unmap(point));
+                    let (x, y) = self
+                        .within
+                        .as_ref()
+                        .map_or(point, |rect| rect().unmap(point));
                     tune::set(&format!("{prefix}/x"), x);
                     tune::set(&format!("{prefix}/y"), y);
                 }
@@ -457,6 +484,14 @@ mod tests {
         assert_eq!(rect.map((1.0, 1.0)), (0.8, -0.5)); // bottom-right
         let (u, v) = rect.unmap(rect.map((0.25, 0.75)));
         assert!((u - 0.25).abs() < 1e-6 && (v - 0.75).abs() < 1e-6);
+    }
+
+    #[test]
+    fn a_rect_fits_any_aspect_inside_itself() {
+        let bounds = Rect::new(1.2, 0.8);
+        assert_eq!(bounds.fit(1.0).size, [0.8, 0.8]); // a square: height-bound
+        let wide = bounds.fit(3.0).size; // wider than the bounds: width-bound
+        assert!((wide[0] - 1.2).abs() < 1e-6 && (wide[1] - 0.4).abs() < 1e-6);
     }
 
     #[test]

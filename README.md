@@ -126,18 +126,23 @@ built for projects onto a cube, one Raspberry Pi per face, calibrated from a
 laptop. Until the Pi arrives, both ends run side by side:
 
 ```
-scripts/face-and-remote.sh        # both windows; close either one to stop both
+scripts/face-and-remote.sh                                             # a cube's square face
+scripts/face-and-remote.sh examples/patches/map-screen/map-screen.vy   # a 16:9 screen
 ```
 
-(Or by hand: `cargo run -p vybe-cli -- run examples/patches/calibration/calibration.vy`
-for the face, `cargo run -p vybe-remote` for the remote. The script takes any
-patch with a `remote <port>`, plus `vybe run` flags:
-`scripts/face-and-remote.sh examples/patches/remote-keystone/remote-keystone.vy --key space=/hands`.)
+Same tool, any shape. A patch says how big its picture is apart from the
+projector's output — `out window 1920x1200  picture 1200x1200` — and the four
+corners you drag are the corners *of that picture*; the face tells the remote its
+proportions, so nothing is configured twice. Close either window to stop both.
+
+(By hand: `cargo run -p vybe-cli -- run <patch>` for the face, `cargo run -p
+vybe-remote` for the remote. The script passes `vybe run` flags through:
+`scripts/face-and-remote.sh examples/patches/map-show/map-show.vy --key space=/hands`.)
 
 Drag a corner in the remote (or TAB + arrows; SHIFT = 10 px) and the face warps;
 `G`/`W`/`H` switch test patterns, SPACE returns to the show, `S` saves the
-keystone next to the patch. They speak OSC over UDP, so the face moves to
-another machine unchanged. The full piece: `examples/patches/remote-keystone/` (run its
+keystone next to the patch, `R` re-reads it, `0` goes back to uncalibrated. They speak OSC over UDP, so the face moves to
+another machine unchanged. The full piece: `examples/patches/map-show/` (run its
 `make-media.sh` once — vybe renders its own media).
 
 ## How it's built

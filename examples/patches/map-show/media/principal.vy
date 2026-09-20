@@ -1,4 +1,4 @@
-# principal.vy · generates the MAIN sequence remote-keystone.vy plays once (its `done`
+# principal.vy · generates the MAIN sequence map-show.vy plays once (its `done`
 # sends the face home). A stand-in for the artist's narrated video.
 #   (rendered by ../make-media.sh)
 

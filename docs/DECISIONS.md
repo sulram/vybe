@@ -802,8 +802,7 @@ flat face, so the warp is one quad whose vertex stage emits homogeneous
 coordinates (the GPU then interpolates perspective-correctly). At rest it is a
 plain copy. The `keystone` crate holds only the *file* (JSON, atomic save,
 `.bak`) and depends on nothing; the math lives with the pass, in the core's
-`stage`. *Known gap:* it warps the whole output, not a square `source` inside a
-16:10 `output` as the brief's file format anticipates — see ROADMAP.
+`stage`. (The first cut warped the whole output; see the next entry.)
 
 **Time semantics (the brief's risk #6), decided:** a *level* holds while its
 condition holds (`off`, `done`, `= N`); an *edge* is true for one update
@@ -867,7 +866,54 @@ instead), `text` and `rust` leaves (they arrive with `Draw`), audio (`mute`,
 persistence. Until `text` exists, the remote's status line lives in its window
 title.
 
-**Media renders itself.** The `remote-keystone` patch needs PNG sequences; they are
+**Media renders itself.** The `map-show` patch needs PNG sequences; they are
 produced by `vybe render` from two small generator patches
-(`examples/patches/remote-keystone/make-media.sh`), so the repo carries no binaries and
+(`examples/patches/map-show/make-media.sh`), so the repo carries no binaries and
 the headless path is exercised by its first real user.
+
+---
+
+## 2026-09-20 — The picture has a size of its own; the keystone maps *it*
+
+The first keystone pulled the corners of the **whole output**. It rendered a
+correct homography and still felt broken the moment a hand was on it: the face
+being mapped is a square, the projector is 16:10, so the handle you dragged was
+the corner of a *black bar*, and the square's corner went somewhere else. The
+saved file proved the protocol worked; the picture proved the model was wrong.
+
+**The decision.** A picture may have a size of its own, apart from its output's:
+`out … 1920x1200  picture 1200x1200`. The core renders at the picture's size; the
+present pass lands that texture in the output through the warp; and so **a
+keystone's four corners are the picture's corners** — measured on a render, they
+land where asked to within a pixel. Uncalibrated, a picture *rests* contained and
+centered (`Warp::fit`), which is also what `/keystone/reset` returns to. Without
+`picture`, the picture is the output and everything behaves as before.
+
+**Where the size is said: the `out` line, not the keystone file.** The brief put
+`source {w,h}` in `keystone.json`. But the picture's shape is a property of the
+*work* — the patch composes in a scene space whose proportions it must know — and
+calibration is a property of the *room*. One patch, many rooms: the shape belongs
+with the patch. It is an argument of `out` (rule twelve), not a thirteenth rule.
+
+**Named `picture`, not `source`.** Inside vybe a *source* is already `circle` /
+`frames` / `video` (the vocabulary's word class). The glossary already calls what
+lands on the wall "the picture". One meaning, one term.
+
+**One calibration tool for every shape.** The remote hard-coded 16:10. Now the
+face announces its shape (`/keystone/shape ow oh pw ph`, sent with every state)
+and the remote draws the output's frame and the picture's quad in their true
+proportions — a 16:9 screen (`map-screen`) and a cube's square face (`map-cube`)
+are the same program pointed at different patches. `/keystone/state` itself is
+untouched (8 floats + feather), so the brief's TouchDesigner-compatible message
+stays compatible; shape is a separate, ignorable message. To make the remote's
+geometry live, the generic bindings learned to ask for their box and step at
+event time (`within_with`, `step_with`) — still generic, still not UI nouns.
+
+**Examples carry a background colour.** A picture on black is indistinguishable
+from the projector's own black, which is exactly what hid this bug. The mapping
+patches now paint the picture edge to edge, so where it ends is visible.
+
+*Left open:* with a picture of its own size under a warp, the window's mouse is
+not un-projected back into the picture (`at(mouse())` would be off). A face on a
+wall has no mouse; the day a warped, mouse-driven picture exists, invert the
+homography at the boundary.

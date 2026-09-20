@@ -669,7 +669,7 @@ impl<'a> Cursor<'a> {
     /// Everything after `out`: `<window|kms> [args]  [keystone <file>]  [remote <port>]`.
     fn out(&mut self) -> Parsed<Out> {
         const SHAPE: &str = "out window 960x600  keystone config/keystone.json  remote 9001\n\
-                             out kms HDMI-A-1 1920x1200 60  keystone config/keystone.json  remote 9001";
+                             out kms HDMI-A-1 1920x1200 60  picture 1200x1200  keystone config/keystone.json  remote 9001";
         let kind = match self.word().as_deref() {
             Some("window") => OutKind::Window,
             Some("kms") => OutKind::Kms,
@@ -686,11 +686,19 @@ impl<'a> Cursor<'a> {
             size: None,
             hz: None,
             keystone: None,
+            picture: None,
             remote: None,
             line: self.line,
         };
         while let Some(word) = self.word() {
             match word.as_str() {
+                "picture" => {
+                    let size = self.word().unwrap_or_default();
+                    out.picture = Some(parse_size(&size).ok_or_else(|| {
+                        self.error(format!("`picture` takes a size, found `{size}`"))
+                            .help("picture 1200x1200   (the face's own size; the keystone lands it in the output)")
+                    })?);
+                }
                 "keystone" => {
                     out.keystone = Some(
                         self.word()
@@ -879,11 +887,14 @@ mod tests {
 
     #[test]
     fn the_out_line() {
-        let patch = ok("out kms HDMI-A-1 1920x1200 60  keystone config/keystone.json  remote 9001");
+        let patch = ok(
+            "out kms HDMI-A-1 1920x1200 60  picture 1200x1200  keystone config/keystone.json  remote 9001",
+        );
         let out = patch.out.unwrap();
         assert_eq!(out.kind, OutKind::Kms);
         assert_eq!(out.connector.as_deref(), Some("HDMI-A-1"));
         assert_eq!(out.size, Some([1920, 1200]));
+        assert_eq!(out.picture, Some([1200, 1200]));
         assert_eq!(out.hz, Some(60.0));
         assert_eq!(out.keystone.as_deref(), Some("config/keystone.json"));
         assert_eq!(out.remote, Some(9001));
@@ -891,7 +902,7 @@ mod tests {
 
     #[test]
     fn the_brief_s_cube_face_parses_whole() {
-        let patch = ok(include_str!("../../tests/fixtures/remote-keystone.vy"));
+        let patch = ok(include_str!("../../tests/fixtures/map-show.vy"));
         assert_eq!(patch.nodes.len(), 14);
         assert_eq!(patch.scenes.len(), 3);
         assert_eq!(patch.transitions.len(), 8);

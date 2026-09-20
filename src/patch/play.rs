@@ -179,10 +179,12 @@ impl Player {
             })
             .collect();
 
+        // `px` is measured on the picture, which is the output unless it has a
+        // size of its own.
         let unit_px = patch
             .out
             .as_ref()
-            .and_then(|out| out.size)
+            .and_then(|out| out.picture.or(out.size))
             .map_or(800.0, |[w, h]| w.min(h) as f32);
         Self {
             held: vec![false; patch.transitions.len()],
@@ -228,9 +230,14 @@ impl Player {
             .unwrap_or([800, 800])
             .map(|px| px as f32);
         let fit = (1280.0 / w).min(800.0 / h).min(1.0);
-        Stage::new(shell::Source::Play(Box::new(self)))
+        let picture = self.patch.out.as_ref().and_then(|out| out.picture);
+        let stage = Stage::new(shell::Source::Play(Box::new(self)))
             .size(w * fit, h * fit)
-            .title("vybe — patch")
+            .title("vybe — patch");
+        match picture {
+            Some([w, h]) => stage.picture(w, h),
+            None => stage,
+        }
     }
 
     /// Advances the performance by `dt` without describing the picture — what

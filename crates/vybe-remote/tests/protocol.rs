@@ -8,7 +8,7 @@ use std::time::Duration;
 use vybe::input::{Binding, Inputs, Io, Value};
 use vybe::stage::Warp;
 use vybe::tune;
-use vybe_remote::{Face, Peer, corner_tune};
+use vybe_remote::{Face, Peer, corner_tune, shape_tune};
 
 /// One side of the conversation: a binding plus the state a stage would own.
 struct Side<B: Binding> {
@@ -58,8 +58,16 @@ fn a_dragged_corner_reaches_the_wall_and_a_save_survives_a_restart() {
     let port = 19_001;
     let address: SocketAddr = ([127, 0, 0, 1], port).into();
 
-    let mut face = Side::new(Face::listen(port, Some(file.clone())).unwrap());
-    let handle = Peer::connect(address, [1920, 1200]).unwrap();
+    // A square face on a 16:10 output: uncalibrated, it rests centered.
+    let picture = [1200, 1200];
+    let uncalibrated = keystone::Keystone {
+        output: [1920, 1200],
+        corners: Warp::fit([1200.0, 1200.0], [1920.0, 1200.0]).corners,
+        feather: 0.0,
+    };
+    let listen = |file| Face::listen(port, Some(file), uncalibrated.clone(), picture).unwrap();
+    let mut face = Side::new(listen(file.clone()));
+    let handle = Peer::connect(address).unwrap();
     let mut peer = Side::new(handle.clone());
 
     // The remote sketch picks its corner tunes (here: at rest).
@@ -69,11 +77,18 @@ fn a_dragged_corner_reaches_the_wall_and_a_save_survives_a_restart() {
         tune(&corner_tune(i, 'y'), y, -0.2..=1.2);
     }
     tune("face/alive", 0.0, 0.0..=1.0);
+    for what in ["output", "picture"] {
+        tune(&shape_tune(what, 'w'), 16.0, 1.0..=16384.0);
+        tune(&shape_tune(what, 'h'), 10.0, 1.0..=16384.0);
+    }
 
     // Heartbeat out, state back: connected.
     let title = converse(&mut face, &mut peer);
     assert!(title.contains("connected"), "{title}");
     assert_eq!(tune::get("face/alive"), Some(1.0));
+    // …and the remote now knows what it is mapping: a square, on 16:10.
+    assert_eq!(tune::get(&shape_tune("output", 'w')), Some(1920.0));
+    assert_eq!(tune::get(&shape_tune("picture", 'h')), Some(1200.0));
 
     // A hand drags the bottom-right corner; the wall follows, in RAM only.
     tune::set(&corner_tune(2, 'x'), 0.9);
@@ -96,8 +111,18 @@ fn a_dragged_corner_reaches_the_wall_and_a_save_survives_a_restart() {
 
     // The player restarts (a power cut): the calibration is still there.
     drop(face);
-    let mut face = Side::new(Face::listen(port, Some(file)).unwrap());
+    let mut face = Side::new(listen(file));
     face.frame();
+    assert_eq!(face.warp.corners[2], [0.9, 0.95]);
+
+    // Reset: back to rest on the wall and in the remote's hands — RAM only, so
+    // the saved calibration is still one `R` away.
+    handle.send("/keystone/reset", None);
+    converse(&mut face, &mut peer);
+    assert_eq!(face.warp.corners, uncalibrated.corners);
+    assert_eq!(tune::get(&corner_tune(2, 'x')), Some(0.8125)); // the square's edge, not the output's
+    handle.send("/keystone/reload", None);
+    converse(&mut face, &mut peer);
     assert_eq!(face.warp.corners[2], [0.9, 0.95]);
 
     std::fs::remove_dir_all(dir).unwrap();

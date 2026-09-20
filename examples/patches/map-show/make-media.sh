@@ -1,6 +1,6 @@
 #!/bin/sh
-# Renders the PNG sequences remote-keystone.vy plays — with vybe itself, headless.
-# Run from anywhere:  examples/patches/remote-keystone/make-media.sh
+# Renders the PNG sequences map-show.vy plays — with vybe itself, headless.
+# Run from anywhere:  examples/patches/map-show/make-media.sh
 set -e
 cd "$(dirname "$0")"
 vybe() { cargo run -q --release -p vybe-cli -- "$@"; }

@@ -44,6 +44,20 @@ impl Stage {
         self.with(input::on(key, action))
     }
 
+    /// Gives the picture a size of its own, in pixels, apart from its output's —
+    /// a square face on a 16:10 projector. It renders at this size and the
+    /// [`Warp`] lands it in the output, so a keystone's four corners are the
+    /// *picture's* corners. At rest it sits contained and centered.
+    pub fn picture(mut self, width: u32, height: u32) -> Self {
+        self.show.picture = Some([width.max(1), height.max(1)]);
+        self
+    }
+
+    /// Where the picture rests, uncalibrated, in an output of this shape.
+    pub fn rest(&self, output: [f32; 2]) -> Warp {
+        self.show.rest(output)
+    }
+
     /// The window's size, in logical pixels (default 800 × 800).
     pub fn size(mut self, width: f32, height: f32) -> Self {
         self.show.size = [width, height];
@@ -97,6 +111,22 @@ impl Default for Warp {
 }
 
 impl Warp {
+    /// A picture of one shape at rest in an output of another: contained,
+    /// centered, undistorted — where a face sits before it is calibrated.
+    /// (Sizes in any unit; only the two shapes matter.)
+    pub fn fit(picture: [f32; 2], output: [f32; 2]) -> Self {
+        let scale = (output[0] / picture[0]).min(output[1] / picture[1]);
+        let half = [
+            picture[0] * scale / output[0] * 0.5,
+            picture[1] * scale / output[1] * 0.5,
+        ];
+        let (l, r, t, b) = (0.5 - half[0], 0.5 + half[0], 0.5 - half[1], 0.5 + half[1]);
+        Self {
+            corners: [[l, t], [r, t], [r, b], [l, b]],
+            feather: 0.0,
+        }
+    }
+
     /// The homography taking the picture's uv (texel space: `(0,0)` top-left)
     /// to homogeneous clip space, as rows. Emitting its `w` from the vertex
     /// stage is what makes the GPU interpolate perspective-correctly.
@@ -262,11 +292,11 @@ impl Render {
             return Ok(Vec::new());
         };
 
-        let mut gpu = Headless::new(self.width, self.height, self.alpha);
+        let mut gpu = Headless::new(self.width, self.height, show.picture, self.alpha);
         gpu.engine().preload(&show.media());
         let mut clock = Clock::fixed(self.fps);
         let mut inputs = Inputs::default();
-        let mut warp = Warp::default();
+        let mut warp = show.rest([self.width as f32, self.height as f32]);
         let mut written = Vec::new();
         for frame in 0..=last {
             let (time, dt) = clock.tick();
@@ -344,6 +374,16 @@ mod tests {
 
     fn close(a: [f32; 2], b: [f32; 2]) -> bool {
         (a[0] - b[0]).abs() < 1e-5 && (a[1] - b[1]).abs() < 1e-5
+    }
+
+    #[test]
+    fn a_square_picture_rests_centered_in_a_wide_output() {
+        let warp = Warp::fit([1200.0, 1200.0], [1920.0, 1200.0]);
+        let inset = (1920.0 - 1200.0) / 2.0 / 1920.0;
+        assert!(close(warp.corners[0], [inset, 0.0]));
+        assert!(close(warp.corners[2], [1.0 - inset, 1.0]));
+        // Same shape: the whole output.
+        assert_eq!(Warp::fit([4.0, 3.0], [800.0, 600.0]), Warp::default());
     }
 
     #[test]

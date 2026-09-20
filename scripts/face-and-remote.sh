@@ -2,15 +2,16 @@
 # Two windows on one machine: a face (a patch, played) and the keystone remote
 # that calibrates it — the laptop stand-in for "a Pi on the wall + a MacBook".
 #
-#   scripts/face-and-remote.sh                       # the calibration patch
-#   scripts/face-and-remote.sh examples/patches/remote-keystone/remote-keystone.vy --key space=/hands
+#   scripts/face-and-remote.sh                       # a cube's square face (map-cube)
+#   scripts/face-and-remote.sh examples/patches/map-screen/map-screen.vy
+#   scripts/face-and-remote.sh examples/patches/map-show/map-show.vy --key space=/hands
 #
 # The first argument is the patch; anything after it goes to `vybe run`.
 # Close either window (or Ctrl-C here) and both go down together.
 set -e
 cd "$(dirname "$0")/.."
 
-patch="${1:-examples/patches/calibration/calibration.vy}"
+patch="${1:-examples/patches/map-cube/map-cube.vy}"
 [ $# -gt 0 ] && shift
 
 if [ ! -f "$patch" ]; then
@@ -57,7 +58,7 @@ fi
 remote=$!
 
 echo "face: $patch   remote: 127.0.0.1:$port   (close either window to stop)"
-echo "remote keys: drag a corner | TAB + arrows (SHIFT = 10 px) | G grid  W white  H gray  SPACE show | S save  R reload"
+echo "remote keys: drag a corner | TAB + arrows (SHIFT = 10 px) | G grid  W white  H gray  SPACE show | S save  R reload  0 reset"
 
 # Whichever window closes first takes the other with it.
 while kill -0 "$face" 2>/dev/null && kill -0 "$remote" 2>/dev/null; do

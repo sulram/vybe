@@ -1,4 +1,4 @@
-# transicao.vy · generates the TRANSITION sequence remote-keystone.vy scrubs with `@`.
+# transicao.vy · generates the TRANSITION sequence map-show.vy scrubs with `@`.
 # It is scrubbed, not played, so every frame must work as a still: one ramp `p`
 # drives everything, 0 -> 1 over the 4 s that get rendered. Alpha is kept.
 #   (rendered by ../make-media.sh)

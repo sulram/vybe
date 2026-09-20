@@ -43,6 +43,11 @@ pub(crate) struct Show {
     pub bindings: Vec<Box<dyn Binding>>,
     /// Logical window size.
     pub size: [f32; 2],
+    /// The picture's own size in pixels, when it has one apart from its output
+    /// — a square face on a 16:10 projector. The [`Warp`] lands it there, so a
+    /// keystone's corners are the *picture's* corners. `None`: the picture is
+    /// the output, whatever size that turns out to be.
+    pub picture: Option<[u32; 2]>,
     pub title: Option<String>,
 }
 
@@ -52,6 +57,7 @@ impl Show {
             source,
             bindings: Vec::new(),
             size: [800.0, 800.0],
+            picture: None,
             title: None,
         }
     }
@@ -71,6 +77,15 @@ impl Show {
             // on the first frame too: describing registers the knobs.)
             Source::Live(sketch) => (crate::tune::take_dirty() || first).then(sketch),
             Source::Play(player) => Some(player.frame(inputs, time, dt)),
+        }
+    }
+
+    /// Where the picture rests before anyone calibrates it: the whole output —
+    /// or, with a size of its own, contained in an output of this shape.
+    pub(crate) fn rest(&self, output: [f32; 2]) -> Warp {
+        match self.picture {
+            Some([w, h]) => Warp::fit([w as f32, h as f32], output),
+            None => Warp::default(),
         }
     }
 
@@ -97,11 +112,11 @@ impl Show {
         let event_loop = EventLoop::new().unwrap();
         event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
         let mut app = App {
+            warp: self.rest(self.size),
             show: self,
             state: None,
             clock: Clock::wall(),
             inputs: Inputs::default(),
-            warp: Warp::default(),
             pointer: [1e9, 1e9],
             shift: false,
             last: (0.0, 0.0),
@@ -182,7 +197,7 @@ impl ApplicationHandler for App {
             ));
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
         #[allow(unused_mut)]
-        let mut state = pollster::block_on(State::new(window.clone(), recipe));
+        let mut state = pollster::block_on(State::new(window.clone(), recipe, self.show.picture));
         state.engine().preload(&self.show.media());
 
         // A live sketch with picked knobs gets the tweak panel — an Overlay

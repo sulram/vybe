@@ -213,13 +213,16 @@ impl Term {
     }
 }
 
-/// `out <output> args  keystone <file>  remote <port>`
+/// `out <output> args  picture WxH  keystone <file>  remote <port>`
 #[derive(Clone, Debug, PartialEq)]
 pub struct Out {
     pub kind: OutKind,
     /// A KMS connector (`HDMI-A-1`).
     pub connector: Option<String>,
     pub size: Option<[u32; 2]>,
+    /// The picture's own size, when it isn't the output's: a square face on a
+    /// 16:10 projector. The keystone's corners are then the picture's corners.
+    pub picture: Option<[u32; 2]>,
     pub hz: Option<f32>,
     pub keystone: Option<String>,
     pub remote: Option<u16>,

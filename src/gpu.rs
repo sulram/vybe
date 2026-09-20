@@ -1241,10 +1241,20 @@ pub(crate) struct State {
     engine: Engine,
     presenter: Presenter,
     overlay: Option<Box<dyn Overlay>>,
+    /// A picture of a fixed size of its own (a face): the window may be any
+    /// shape, the warp lands the picture in it. `false`: the picture *is* the
+    /// window, and follows its size.
+    fixed_picture: bool,
 }
 
 impl State {
-    pub(crate) async fn new(window: Arc<Window>, recipe: Recipe) -> Self {
+    /// `picture`: render at this size whatever the window's (see
+    /// [`Show::picture`](crate::shell::Show)); `None` renders at the window's.
+    pub(crate) async fn new(
+        window: Arc<Window>,
+        recipe: Recipe,
+        picture: Option<[u32; 2]>,
+    ) -> Self {
         let size = window.inner_size();
         let (width, height) = (size.width.max(1), size.height.max(1));
 
@@ -1273,11 +1283,13 @@ impl State {
         };
         surface.configure(&device, &config);
 
-        let mut engine = Engine::new(device, queue, width, height);
+        let [picture_w, picture_h] = picture.unwrap_or([width, height]);
+        let mut engine = Engine::new(device, queue, picture_w.max(1), picture_h.max(1));
         engine.set_recipe(recipe);
         let presenter = Presenter::new(&engine, format, false);
 
         Self {
+            fixed_picture: picture.is_some(),
             window,
             surface,
             config,
@@ -1327,7 +1339,9 @@ impl State {
         self.config.width = size.width;
         self.config.height = size.height;
         self.surface.configure(&self.engine.device, &self.config);
-        self.engine.resize(size.width, size.height);
+        if !self.fixed_picture {
+            self.engine.resize(size.width, size.height);
+        }
     }
 
     /// The pointer moved: returns where, in scene space, and feeds the mouse
@@ -1402,14 +1416,23 @@ pub(crate) struct Headless {
     frame: wgpu::Texture,
     view: wgpu::TextureView,
     readback: wgpu::Buffer,
+    /// The output's size — the picture's own may differ (see [`Headless::new`]).
+    size: [u32; 2],
     /// Row stride of the readback buffer (wgpu aligns copies to 256 bytes).
     stride: u32,
 }
 
 impl Headless {
-    /// `keep_alpha`: frames keep their transparency (a PNG sequence another
-    /// patch will layer) instead of landing on black.
-    pub(crate) fn new(width: u32, height: u32, keep_alpha: bool) -> Self {
+    /// `width × height` is the output. `picture`: render at this size instead,
+    /// and let the warp land it in the output (`None`: the picture is the
+    /// output). `keep_alpha`: frames keep their transparency (a PNG sequence
+    /// another patch will layer) instead of landing on black.
+    pub(crate) fn new(
+        width: u32,
+        height: u32,
+        picture: Option<[u32; 2]>,
+        keep_alpha: bool,
+    ) -> Self {
         let (width, height) = (width.max(1), height.max(1));
         let instance = wgpu::Instance::default();
         let (_, device, queue) = pollster::block_on(request_device(&instance, None));
@@ -1436,9 +1459,11 @@ impl Headless {
             mapped_at_creation: false,
         });
 
-        let engine = Engine::new(device, queue, width, height);
+        let [picture_w, picture_h] = picture.unwrap_or([width, height]);
+        let engine = Engine::new(device, queue, picture_w.max(1), picture_h.max(1));
         let presenter = Presenter::new(&engine, CAPTURE_FORMAT, keep_alpha);
         Self {
+            size: [width, height],
             view: frame.create_view(&wgpu::TextureViewDescriptor::default()),
             frame,
             engine,
@@ -1460,7 +1485,7 @@ impl Headless {
     /// must be rendered even when only some are kept — a feedback loop is the
     /// sum of its past.
     pub(crate) fn render(&mut self, time: f32, dt: f32, capture: bool) -> Option<Pixels> {
-        let (width, height) = (self.engine.width, self.engine.height);
+        let [width, height] = self.size;
         let mut encoder =
             self.engine
                 .device

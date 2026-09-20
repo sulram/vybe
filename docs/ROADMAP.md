@@ -21,9 +21,9 @@ abandoned roadmap lies.
 
 The thesis shifted (DECISIONS 2026-09-20): **the patch is the product.** The
 pulling kata is a projected cube installation; this section follows the order
-of the 0.0.2 design brief. Acceptance: `vybe render remote-keystone.vy --osc
+of the 0.0.2 design brief. Acceptance: `vybe render map-show.vy --osc
 "/hands 1 @1s"` shows idle → touch → play on a Mac, no Pi, no GStreamer — **met**
-(`examples/patches/remote-keystone/`).
+(`examples/patches/map-show/`).
 
 - [x] `vybe render`: headless, fixed `Clock`, scripted inputs (`--osc`), PNG out;
       identical across runs. Also `VYBE_RENDER=…` on any `.rs` example.
@@ -46,10 +46,14 @@ of the 0.0.2 design brief. Acceptance: `vybe render remote-keystone.vy --osc
 - [x] `.vy` syntax highlighting (`editors/vscode/`): a TextMate grammar
       *generated* from the vocabulary (`vybe grammar`); a test fails when the
       checked-in file is stale. `scripts/face-and-remote.sh` runs both windows.
-- [ ] **Keystone `source` size**: render the face at its own size (1200²) and
-      warp *its* corners into the output (1920×1200). Today the warp pulls the
-      whole output's corners — calibrates fine, but the handles aren't the
-      square's. The brief's `keystone.json` already anticipates `source {w,h}`.
+- [x] **The picture has its own size** (`out … picture WxH`): renders at that
+      size, rests contained, and the keystone maps *its* corners (within a pixel,
+      measured). The remote learns any face's shape over OSC — `map-cube`
+      (square) and `map-screen` (16:9) are one tool. DECISIONS 2026-09-20 (2nd).
+- [ ] Un-project the mouse through the warp (only matters for a warped,
+      mouse-driven picture — none exists yet).
+- [ ] A `grid` that fills a non-square picture (today it spans the unit square;
+      `map-screen` draws its test pattern from lines instead).
 - [ ] `Draw` + `canvas()` + `rust <name>` leaves; `text` (one embedded mono
       font), `polygon`, `arc`. Kata: `canvas_ring` (the loading ring). Until
       then the remote's status line lives in its window title.
@@ -264,6 +268,8 @@ Patches (`examples/patches/<name>/`), 0.0.2:
 - [x] `hello` — the smallest patch. `trails` — `|` into `feedback` (twin of the
       `feedback` sketch, pixel for pixel). `stack` — `+ * add` and Scalars.
 - [x] `scenes` — scenes, transitions, a key as a gate.
-- [x] `calibration` — test patterns as scenes; the face the remote talks to.
-- [x] `remote-keystone` — the cube face, laptop edition: scenes + keystone +
+- [x] `map-cube` / `map-screen` — one calibration tool, two shapes: a cube's
+      square face and a 16:9 screen, each a `picture` inside a 16:10 output;
+      test patterns as scenes; the faces the remote talks to.
+- [x] `map-show` — the cube face, laptop edition: scenes + keystone +
       remote in one patch; renders its own media.

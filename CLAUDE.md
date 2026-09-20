@@ -47,9 +47,12 @@ settled decisions in [DECISIONS.md](docs/DECISIONS.md); what we intend to build 
 - Picked knobs, live: `cargo run --example <dots_tune|dots_tune_xy>` (examples always
   carry the panel via the self dev-dependency; the lib never does)
 - Run a patch: `cargo run -p vybe-cli -- run examples/patches/<name>/<name>.vy`
-  (`hello`, `trails`, `stack`, `scenes`, `calibration`, `remote-keystone`)
+  (`hello`, `trails`, `stack`, `scenes`, `map-cube`, `map-screen`, `map-show`)
 - Two windows (face + remote): `scripts/face-and-remote.sh [patch] [run flags]`
-  (default: the calibration patch; closing either window stops both)
+  (default: `map-cube`; closing either window stops both)
+- A picture with its own size: `out … picture WxH` — renders at that size, the
+  keystone's corners are ITS corners. Mapping examples paint a background, so
+  the picture's edge is visible against the projector's black.
 - **Look at what you built — headless:**
   - patch: `cargo run -p vybe-cli -- render x.vy --at 0s,2s --osc "/hands 1 @1s" --out frames/`
   - any example: `VYBE_RENDER="at=2.5 size=500x500 out=frames" cargo run --example dots`

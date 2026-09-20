@@ -302,8 +302,10 @@ a -> b  cond  cut|fade Ns  [sound]         transition;  * = from any scene
 cond:  node rise|off|done | node = N | c & c
 units: s  hz  px    - no unit = scene units (shorter edge is 1)
 name = rust <fn>                           imperative leaf, registered at compile time
-out <output> args  keystone <file>  remote <port>
+out <output> args  picture WxH  keystone <file>  remote <port>
 
+`picture`: the face's own size when it isn't the output's (a square on a 16:10 projector);
+the keystone's four corners are then the picture's corners.
 A number socket takes: a number, a Scalar's name, (an expression), smooth(x), or osc <hz> <amp>.
 A transition fires on the frame its whole condition BECOMES true while its `from` scene shows.
 A line starting with | or + continues the node above it.  # starts a comment.";

@@ -151,14 +151,22 @@ fn stage(path: &Path, patch: Patch, listen: bool) -> Result<Stage, String> {
     ));
     if let Some(out) = out {
         let keystone = out.keystone.map(|file| base.join(file));
+        // Uncalibrated, the picture rests contained in its output.
+        let output = out.size.unwrap_or([800, 800]);
+        let rest = Keystone {
+            output,
+            corners: stage.rest(output.map(|px| px as f32)).corners,
+            feather: 0.0,
+        };
         match out.remote {
             Some(port) if listen => {
-                stage = stage.with(Face::listen(port, keystone)?);
+                let picture = out.picture.unwrap_or(output);
+                stage = stage.with(Face::listen(port, keystone, rest, picture)?);
                 eprintln!("vybe: listening for OSC on port {port}");
             }
             _ => {
                 if let Some(file) = keystone {
-                    let keystone = Keystone::load_or_default(&file).map_err(|e| e.to_string())?;
+                    let keystone = Keystone::load_or(&file, rest).map_err(|e| e.to_string())?;
                     stage = stage.with(Fixed(Warp {
                         corners: keystone.corners,
                         feather: keystone.feather,

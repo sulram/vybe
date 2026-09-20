@@ -22,7 +22,7 @@
       "beginCaptures": { "1": { "name": "keyword.control.out.vy" } },
       "patterns": [
         { "include": "#comment" },
-        { "name": "keyword.other.out.vy", "match": "\\b(window|kms|keystone|remote)\\b" },
+        { "name": "keyword.other.out.vy", "match": "\\b(window|kms|picture|keystone|remote)\\b" },
         { "name": "constant.numeric.size.vy", "match": "\\b\\d+x\\d+\\b" },
         { "name": "constant.numeric.vy", "match": "\\b\\d+(\\.\\d+)?\\b" },
         { "name": "string.unquoted.path.vy", "match": "[^\\s#]+" }
@@ -50,7 +50,7 @@
         { "name": "keyword.operator.vy", "match": "=|&" },
         { "include": "#number" },
         { "name": "string.unquoted.path.vy", "match": "[^\\s#]+\\.[A-Za-z0-9]+" },
-        { "name": "variable.other.node.vy", "match": "\\b[A-Za-z_]\\w*\\b" }
+        { "name": "variable.parameter.wire.vy", "match": "\\b[A-Za-z_]\\w*\\b" }
       ]
     },
     "scene": {
@@ -103,11 +103,11 @@
         },
         { "name": "support.function.source.vy", "match": "\\b(circle|rect|line|frames|video|text)\\b" },
         { "name": "support.function.scalar.vy", "match": "\\b(osc|ramp|smooth)\\b" },
-        { "name": "keyword.operator.word.vy", "match": "\\badd\\b" },
+        { "name": "keyword.other.blend.vy", "match": "\\badd\\b" },
         { "name": "entity.other.attribute-name.vy", "match": "\\b(at|x|y|alpha|size|gray|hue|drift|soft|stroke|wave|grid|fit|loop|fps|paused|mute|vol|decay|angle|scale|debounce|up|down)\\b" },
         { "include": "#number" },
         { "name": "keyword.operator.vy", "match": "[+*@|&()-]" },
-        { "name": "variable.other.node.vy", "match": "\\b[A-Za-z_]\\w*\\b" }
+        { "name": "variable.parameter.wire.vy", "match": "\\b[A-Za-z_]\\w*\\b" }
       ]
     },
     "number": {

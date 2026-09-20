@@ -8,10 +8,12 @@
 //! |---------------|---------------------|------------|---------------------------------------------|
 //! | remote → face | `/keystone/get`     |            | reply `/keystone/state`; also the heartbeat |
 //! | face → remote | `/keystone/state`   | 8 f + f    | four corners (TL TR BR BL) + feather        |
+//! | face → remote | `/keystone/shape`   | `ow oh pw ph` | output and picture sizes, px — sent with every state, so a remote draws any face in its true proportions |
 //! | remote → face | `/keystone/corner`  | `i x y`    | live, RAM only                              |
 //! | remote → face | `/keystone/feather` | `f`        | live, RAM only                              |
 //! | remote → face | `/keystone/save`    |            | atomic write + `.bak`; reply `/keystone/saved ok` |
 //! | remote → face | `/keystone/reload`  |            | drop RAM state, re-read the file            |
+//! | remote → face | `/keystone/reset`   |            | back to rest (uncalibrated), RAM only; reply `/keystone/state` |
 //! | remote → face | `/param/<name>`     | `v`        | turns a `tune`                              |
 //! | anyone → face | anything else       | `v`        | lands in the patch's inputs (`/hands 1`, `/mode grid`) |
 //!
@@ -36,6 +38,17 @@ pub fn corner_tune(index: usize, axis: char) -> String {
     format!("map/{index}/{axis}")
 }
 
+/// The tunes the remote sketch reads a face's shape from, in pixels:
+/// `face/output/w|h` and `face/picture/w|h`.
+pub fn shape_tune(what: &str, axis: char) -> String {
+    format!("face/{what}/{axis}")
+}
+
+fn shape_message(output: [u32; 2], picture: [u32; 2]) -> Message {
+    let sizes = [output[0], output[1], picture[0], picture[1]];
+    Message::new("/keystone/shape", sizes.map(|px| Arg::Int(px as i32)))
+}
+
 fn state_message(keystone: &Keystone) -> Message {
     let corners = keystone.corners.iter().flatten().map(|&v| Arg::Float(v));
     Message::new(
@@ -54,25 +67,39 @@ fn state_message(keystone: &Keystone) -> Message {
 pub struct Face {
     osc: Osc,
     keystone: Keystone,
+    /// Uncalibrated: where the picture rests when there is no file, and what
+    /// `/keystone/reset` goes back to.
+    rest: Keystone,
+    /// The picture's own size, px — what the four corners are the corners *of*.
+    picture: [u32; 2],
     /// Where `/keystone/save` writes. `None`: calibration lives in RAM only.
     path: Option<PathBuf>,
 }
 
 impl Face {
-    /// Listens on `port`; loads `path` if it exists (uncalibrated otherwise).
-    /// A keystone file that exists but is broken is an error — better to
-    /// refuse to start than to project uncalibrated over a damaged file.
-    pub fn listen(port: u16, path: Option<PathBuf>) -> Result<Self, String> {
+    /// Listens on `port`; loads `path` if it exists, and starts at `rest`
+    /// (uncalibrated) otherwise. A keystone file that exists but is broken is
+    /// an error — better to refuse to start than to project uncalibrated over
+    /// a damaged file. `picture` is the size being mapped (the output's own,
+    /// `rest.output`, when the picture has none).
+    pub fn listen(
+        port: u16,
+        path: Option<PathBuf>,
+        rest: Keystone,
+        picture: [u32; 2],
+    ) -> Result<Self, String> {
         let osc = Osc::bind(port).map_err(|e| {
             format!("can't listen for OSC on port {port}: {e}\n    help: another player may hold it — pick another with `remote <port>`")
         })?;
         let keystone = match &path {
-            Some(path) => Keystone::load_or_default(path).map_err(|e| e.to_string())?,
-            None => Keystone::default(),
+            Some(path) => Keystone::load_or(path, rest.clone()).map_err(|e| e.to_string())?,
+            None => rest.clone(),
         };
         Ok(Self {
             osc,
             keystone,
+            rest,
+            picture,
             path,
         })
     }
@@ -82,8 +109,14 @@ impl Face {
             // A reply that can't be sent is the remote's heartbeat to notice.
             let _ = osc.send(from, &message);
         };
+        // The shape goes first, so a remote knows the proportions by the time
+        // the corners arrive.
+        let shape = shape_message(self.rest.output, self.picture);
         match message.address.as_str() {
-            "/keystone/get" => reply(&self.osc, state_message(&self.keystone)),
+            "/keystone/get" => {
+                reply(&self.osc, shape);
+                reply(&self.osc, state_message(&self.keystone));
+            }
             "/keystone/corner" => {
                 let corner = message.number(0).map(|i| i as usize);
                 if let (Some(i @ 0..=3), Some(x), Some(y)) =
@@ -112,11 +145,15 @@ impl Face {
             }
             "/keystone/reload" => {
                 if let Some(path) = &self.path {
-                    match Keystone::load_or_default(path) {
+                    match Keystone::load_or(path, self.rest.clone()) {
                         Ok(keystone) => self.keystone = keystone,
                         Err(e) => eprintln!("vybe: {e}"),
                     }
                 }
+                reply(&self.osc, state_message(&self.keystone));
+            }
+            "/keystone/reset" => {
+                self.keystone = self.rest.clone();
                 reply(&self.osc, state_message(&self.keystone));
             }
             address => {
@@ -170,8 +207,8 @@ pub struct Peer(Rc<RefCell<PeerState>>);
 struct PeerState {
     osc: Osc,
     face: SocketAddr,
-    /// The output's size in pixels — only to print a corner the way a
-    /// projector counts it.
+    /// The output's size in pixels, as the face announced it — to print a
+    /// corner the way a projector counts it.
     output: [u32; 2],
     /// What the face is known to hold; a tune that differs gets sent.
     sent: [[f32; 2]; 4],
@@ -188,11 +225,11 @@ struct PeerState {
 }
 
 impl Peer {
-    pub fn connect(face: SocketAddr, output: [u32; 2]) -> std::io::Result<Self> {
+    pub fn connect(face: SocketAddr) -> std::io::Result<Self> {
         Ok(Self(Rc::new(RefCell::new(PeerState {
             osc: Osc::open()?,
             face,
-            output,
+            output: [1920, 1200], // until the face says
             sent: Keystone::default().corners,
             since_beat: HEARTBEAT, // beat on the first frame
             since_heard: SILENCE,
@@ -206,8 +243,8 @@ impl Peer {
     /// Sends `/address [word]` to the face.
     pub fn send(&self, address: &str, word: Option<&str>) {
         let mut state = self.0.borrow_mut();
-        // The face answers a reload with the state it re-read.
-        state.adopt |= address == "/keystone/reload";
+        // The face answers a reload or a reset with the state it now holds.
+        state.adopt |= matches!(address, "/keystone/reload" | "/keystone/reset");
         let _ = state
             .osc
             .send(state.face, &Message::new(address, word.map(Arg::from)));
@@ -248,6 +285,16 @@ impl Binding for Peer {
                     }
                     state.adopt = false;
                     state.dirty = false;
+                }
+                "/keystone/shape" => {
+                    let px = |i: usize| message.number(i).filter(|px| *px >= 1.0);
+                    if let (Some(ow), Some(oh), Some(pw), Some(ph)) = (px(0), px(1), px(2), px(3)) {
+                        state.output = [ow as u32, oh as u32];
+                        for (what, [w, h]) in [("output", [ow, oh]), ("picture", [pw, ph])] {
+                            tune::set(&shape_tune(what, 'w'), w);
+                            tune::set(&shape_tune(what, 'h'), h);
+                        }
+                    }
                 }
                 "/keystone/saved" => {
                     let status = message.args.first().and_then(Arg::text).unwrap_or("?");

@@ -1,4 +1,4 @@
-# remote-keystone.vy · one cube face — the patch from the 0.0.2 design brief, as
+# map-show.vy · one cube face — the patch from the 0.0.2 design brief, as
 # designed for the wall (video, a rust leaf, KMS). A parser fixture: it must always
 # parse. One change from the brief: its node `frames = frames …` is `trans`
 # here, because a node can't take a word of the language as its name.

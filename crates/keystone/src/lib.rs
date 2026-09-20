@@ -86,8 +86,15 @@ impl Keystone {
     /// A file that exists but is broken is still an error: silently projecting
     /// uncalibrated over a damaged calibration would hide the damage.
     pub fn load_or_default(path: &Path) -> Result<Self, Error> {
+        Self::load_or(path, Self::default())
+    }
+
+    /// Like [`Keystone::load_or_default`], but "uncalibrated" is `rest` — for a
+    /// picture that doesn't rest on the whole output (a square face, centered
+    /// in a 16:10 projector).
+    pub fn load_or(path: &Path, rest: Self) -> Result<Self, Error> {
         match Self::load(path) {
-            Err(Error::Io(_, e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
+            Err(Error::Io(_, e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(rest),
             other => other,
         }
     }
