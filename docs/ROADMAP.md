@@ -43,6 +43,9 @@ of the 0.0.2 design brief. Acceptance: `vybe render remote-keystone.vy --osc
 - [x] Keyboard + mouse as `Inputs`; `Binding` seam; `arrows_nudge`,
       `mouse_drag`, `.on(Key)`, `key_cycle`. `live()` returns a `Stage`.
 - [x] Kata pairs `.rs`/`.vy` byte-identical (`tests/pairs.rs`, `--ignored`: GPU).
+- [x] `.vy` syntax highlighting (`editors/vscode/`): a TextMate grammar
+      *generated* from the vocabulary (`vybe grammar`); a test fails when the
+      checked-in file is stale. `scripts/face-and-remote.sh` runs both windows.
 - [ ] **Keystone `source` size**: render the face at its own size (1200²) and
       warp *its* corners into the output (1920×1200). Today the warp pulls the
       whole output's corners — calibrates fine, but the handles aren't the

@@ -17,7 +17,7 @@ readme = "README.md"
 keywords = ["creative-coding", "graphics", "wgpu", "webgpu", "generative-art"]
 categories = ["rendering", "visualization", "multimedia"]
 # Ship only what a consumer needs; dev docs and infra stay in the repo.
-exclude = [".github/", "docs/", "CLAUDE.md", "rustfmt.toml"]
+exclude = [".github/", "docs/", "editors/", "scripts/", "CLAUDE.md", "rustfmt.toml"]
 
 [dependencies]
 wgpu = "30"

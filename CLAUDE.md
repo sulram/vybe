@@ -48,8 +48,8 @@ settled decisions in [DECISIONS.md](docs/DECISIONS.md); what we intend to build 
   carry the panel via the self dev-dependency; the lib never does)
 - Run a patch: `cargo run -p vybe-cli -- run examples/patches/<name>/<name>.vy`
   (`hello`, `trails`, `stack`, `scenes`, `calibration`, `remote-keystone`)
-- Two windows (face + remote): `… run examples/patches/calibration/calibration.vy`,
-  then `cargo run -p vybe-remote`
+- Two windows (face + remote): `scripts/face-and-remote.sh [patch] [run flags]`
+  (default: the calibration patch; closing either window stops both)
 - **Look at what you built — headless:**
   - patch: `cargo run -p vybe-cli -- render x.vy --at 0s,2s --osc "/hands 1 @1s" --out frames/`
   - any example: `VYBE_RENDER="at=2.5 size=500x500 out=frames" cargo run --example dots`
@@ -70,6 +70,7 @@ settled decisions in [DECISIONS.md](docs/DECISIONS.md); what we intend to build 
   - `src/tweak.rs` — the panel Overlay (feature `tweak`; egui, renderer ours).
   - `src/shaders/*.wgsl` — WGSL, embedded via `include_str!`.
   - `examples/*.rs` — THE SKETCHES. `examples/patches/<name>/` — THE PATCHES.
+  - `editors/vscode/` — `.vy` highlighting; its grammar is GENERATED, never edited.
 - Workspace — crates cut **by dependency, not by platform**:
   - `crates/vybe-cli` (`vybe run|render|check|api`; clap)
   - `crates/vybe-io` (OSC over UDP; rosc) · `crates/keystone` (the calibration
@@ -87,7 +88,10 @@ settled decisions in [DECISIONS.md](docs/DECISIONS.md); what we intend to build 
   after existing in the Rust sugar first, **only** when a second work pulls them.
 - Never application nouns (`points`, `pick`, `nudge`…): that is a generic
   binding over `tune`s, or an ordinary scene switched by an ordinary input.
-- A new word = one row in `patch/vocabulary.rs` (parser, checker, `api` follow).
+- A new word = one row in `patch/vocabulary.rs` (parser, checker, `api` follow),
+  then regenerate the editor grammar — a test fails if you forget:
+  `cargo run -p vybe-cli -- grammar > editors/vscode/syntaxes/vy.tmLanguage.json`
+  (highlighting *rules* live in `src/patch/vy.tmLanguage.template.json`).
 - A patch must not know which machine it runs on: stand-ins are CLI flags
   (`--key space=/hands`) and fallbacks (`out kms` → window), never grammar.
 - Every diagnostic carries its next step (`did you mean`, the `ffmpeg` line).

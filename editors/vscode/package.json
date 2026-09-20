@@ -1,0 +1,24 @@
+{
+  "name": "vybe-vy",
+  "displayName": "vybe patches (.vy)",
+  "description": "Syntax highlighting for vybe .vy patches. The grammar is generated from the engine's own vocabulary (`vybe grammar`).",
+  "version": "0.0.2",
+  "publisher": "vybe",
+  "license": "MIT OR Apache-2.0",
+  "repository": { "type": "git", "url": "https://github.com/sulram/vybe" },
+  "engines": { "vscode": "^1.75.0" },
+  "categories": ["Programming Languages"],
+  "contributes": {
+    "languages": [
+      {
+        "id": "vy",
+        "aliases": ["vybe patch", "vy"],
+        "extensions": [".vy"],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      { "language": "vy", "scopeName": "source.vy", "path": "./syntaxes/vy.tmLanguage.json" }
+    ]
+  }
+}

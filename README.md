@@ -47,6 +47,11 @@ vybe api                                              # the whole vocabulary, fo
 Headless rendering is deterministic — fixed clock, scripted inputs, same pixels
 every time — so a patch and its Rust twin are compared pixel for pixel.
 
+**Syntax highlighting** for `.vy` in VS Code (and anything that reads TextMate
+grammars): `ln -s "$PWD/editors/vscode" ~/.vscode/extensions/vybe-vy`, then
+reload the window. The grammar is generated from the engine's own vocabulary
+(`vybe grammar`), so it can't fall behind the language.
+
 ## The chain
 
 Nobody loves an engine — they love the language. A sketch is short, readable,
@@ -121,9 +126,13 @@ built for projects onto a cube, one Raspberry Pi per face, calibrated from a
 laptop. Until the Pi arrives, both ends run side by side:
 
 ```
-cargo run -p vybe-cli -- run examples/patches/calibration/calibration.vy   # window 1: the face
-cargo run -p vybe-remote                                                   # window 2: the remote
+scripts/face-and-remote.sh        # both windows; close either one to stop both
 ```
+
+(Or by hand: `cargo run -p vybe-cli -- run examples/patches/calibration/calibration.vy`
+for the face, `cargo run -p vybe-remote` for the remote. The script takes any
+patch with a `remote <port>`, plus `vybe run` flags:
+`scripts/face-and-remote.sh examples/patches/remote-keystone/remote-keystone.vy --key space=/hands`.)
 
 Drag a corner in the remote (or TAB + arrows; SHIFT = 10 px) and the face warps;
 `G`/`W`/`H` switch test patterns, SPACE returns to the show, `S` saves the

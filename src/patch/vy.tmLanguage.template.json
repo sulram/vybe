@@ -1,0 +1,121 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "vybe patch",
+  "scopeName": "source.vy",
+  "fileTypes": ["vy"],
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#out" },
+    { "include": "#transition" },
+    { "include": "#scene" },
+    { "include": "#node" },
+    { "include": "#body" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.number-sign.vy",
+      "match": "#.*$"
+    },
+    "out": {
+      "begin": "^\\s*(out)\\b",
+      "end": "$",
+      "beginCaptures": { "1": { "name": "keyword.control.out.vy" } },
+      "patterns": [
+        { "include": "#comment" },
+        { "name": "keyword.other.out.vy", "match": "\\b(window|kms|keystone|remote)\\b" },
+        { "name": "constant.numeric.size.vy", "match": "\\b\\d+x\\d+\\b" },
+        { "name": "constant.numeric.vy", "match": "\\b\\d+(\\.\\d+)?\\b" },
+        { "name": "string.unquoted.path.vy", "match": "[^\\s#]+" }
+      ]
+    },
+    "transition": {
+      "begin": "^\\s*(\\*|[A-Za-z_]\\w*)\\s*(->)\\s*([A-Za-z_]\\w*)",
+      "end": "$",
+      "beginCaptures": {
+        "1": { "name": "entity.name.type.scene.vy" },
+        "2": { "name": "keyword.control.transition.vy" },
+        "3": { "name": "entity.name.type.scene.vy" }
+      },
+      "patterns": [
+        { "include": "#comment" },
+        { "name": "keyword.control.condition.vy", "match": "\\b(rise|off|done)\\b" },
+        { "name": "keyword.control.transition.vy", "match": "\\b(cut|fade)\\b" },
+        {
+          "match": "(=)\\s*([A-Za-z_]\\w*)",
+          "captures": {
+            "1": { "name": "keyword.operator.comparison.vy" },
+            "2": { "name": "constant.other.symbol.vy" }
+          }
+        },
+        { "name": "keyword.operator.vy", "match": "=|&" },
+        { "include": "#number" },
+        { "name": "string.unquoted.path.vy", "match": "[^\\s#]+\\.[A-Za-z0-9]+" },
+        { "name": "variable.other.node.vy", "match": "\\b[A-Za-z_]\\w*\\b" }
+      ]
+    },
+    "scene": {
+      "begin": "^\\s*([A-Za-z_]\\w*)\\s*(:)",
+      "end": "$",
+      "beginCaptures": {
+        "1": { "name": "entity.name.type.scene.vy" },
+        "2": { "name": "punctuation.separator.scene.vy" }
+      },
+      "patterns": [{ "include": "#body" }]
+    },
+    "node": {
+      "match": "^\\s*([A-Za-z_]\\w*)\\s*(=)",
+      "captures": {
+        "1": { "name": "entity.name.function.node.vy" },
+        "2": { "name": "keyword.operator.assignment.vy" }
+      }
+    },
+    "body": {
+      "patterns": [
+        { "include": "#comment" },
+        { "name": "string.quoted.double.vy", "begin": "\"", "end": "\"" },
+        {
+          "match": "\\b(@MEDIA@)\\s+([^\\s#]+)",
+          "captures": {
+            "1": { "name": "support.function.source.vy" },
+            "2": { "name": "string.unquoted.path.vy" }
+          }
+        },
+        {
+          "match": "\\b(osc)\\s+(/[^\\s#]*)",
+          "captures": {
+            "1": { "name": "support.function.scalar.vy" },
+            "2": { "name": "constant.other.address.vy" }
+          }
+        },
+        {
+          "match": "\\b(rust)\\s+([A-Za-z_]\\w*)",
+          "captures": {
+            "1": { "name": "keyword.other.leaf.vy" },
+            "2": { "name": "entity.name.function.leaf.vy" }
+          }
+        },
+        {
+          "match": "(\\|)\\s*(@EFFECTS@)\\b",
+          "captures": {
+            "1": { "name": "keyword.operator.pipe.vy" },
+            "2": { "name": "support.function.effect.vy" }
+          }
+        },
+        { "name": "support.function.source.vy", "match": "\\b(@SOURCES@)\\b" },
+        { "name": "support.function.scalar.vy", "match": "\\b(osc|ramp|smooth)\\b" },
+        { "name": "keyword.operator.word.vy", "match": "\\badd\\b" },
+        { "name": "entity.other.attribute-name.vy", "match": "\\b(@MODS@|@PARAMS@|debounce|up|down)\\b" },
+        { "include": "#number" },
+        { "name": "keyword.operator.vy", "match": "[+*@|&()-]" },
+        { "name": "variable.other.node.vy", "match": "\\b[A-Za-z_]\\w*\\b" }
+      ]
+    },
+    "number": {
+      "match": "(?<![\\w.])(\\d*\\.?\\d+)(s|hz|px)?\\b",
+      "captures": {
+        "1": { "name": "constant.numeric.vy" },
+        "2": { "name": "keyword.other.unit.vy" }
+      }
+    }
+  }
+}

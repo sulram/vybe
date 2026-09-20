@@ -4,6 +4,7 @@
 //!   vybe run    face.vy --key space=/hands  play it in a window
 //!   vybe render face.vy --at 0s,2s,4.5s --osc "/hands 1 @1s" --out frames/
 //!   vybe api                                the whole vocabulary, to paste into a model's context
+//!   vybe grammar                            the TextMate grammar, generated from that vocabulary
 //!
 //! For an author who can't look at a screen — a model — `render` and `check`
 //! *are* the screen: write, render, look, correct, alone.
@@ -61,12 +62,19 @@ enum Command {
     Check { patch: PathBuf },
     /// Print the whole patch vocabulary
     Api,
+    /// Print the TextMate grammar editors highlight `.vy` with
+    /// (`vybe grammar > editors/vscode/syntaxes/vy.tmLanguage.json`)
+    Grammar,
 }
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Command::Api => {
             print!("{}", patch::vocabulary::api());
+            Ok(())
+        }
+        Command::Grammar => {
+            print!("{}", patch::vocabulary::textmate());
             Ok(())
         }
         Command::Check { patch } => load(&patch).map(|_| println!("{}: ok", patch.display())),
@@ -283,5 +291,19 @@ impl Binding for KeyInput {
                 io.inputs.set(&self.address, Value::Num(held));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The checked-in grammar is generated, never edited: a new word in the
+    /// vocabulary must reach the editors in the same change.
+    #[test]
+    fn the_editor_grammar_is_up_to_date() {
+        let checked_in = include_str!("../../../editors/vscode/syntaxes/vy.tmLanguage.json");
+        assert!(
+            checked_in == vybe::patch::vocabulary::textmate(),
+            "stale grammar — regenerate it:\n    cargo run -p vybe-cli -- grammar > editors/vscode/syntaxes/vy.tmLanguage.json"
+        );
     }
 }

@@ -364,3 +364,29 @@ pub fn api() -> String {
     }
     out
 }
+
+/// A TextMate grammar for `.vy` — what `vybe grammar` prints, and what editors
+/// highlight with. The rules are a template; the *words* come from the tables
+/// above, so highlighting can't fall behind the language.
+pub fn textmate() -> String {
+    let words = |names: Vec<&str>| names.join("|");
+    let of_family = |family: Family| {
+        SOURCES
+            .iter()
+            .filter(move |w| w.family == family)
+            .map(|w| w.name)
+    };
+    let params = EFFECTS.iter().flat_map(|e| e.params.iter().map(|p| p.0));
+    include_str!("vy.tmLanguage.template.json")
+        .replace("@MEDIA@", &words(of_family(Family::Media).collect()))
+        .replace(
+            "@SOURCES@",
+            &words(SOURCES.iter().map(|w| w.name).collect()),
+        )
+        .replace("@MODS@", &words(MODS.iter().map(|w| w.name).collect()))
+        .replace(
+            "@EFFECTS@",
+            &words(EFFECTS.iter().map(|w| w.name).collect()),
+        )
+        .replace("@PARAMS@", &words(params.collect()))
+}
