@@ -917,3 +917,34 @@ patches now paint the picture edge to edge, so where it ends is visible.
 not un-projected back into the picture (`at(mouse())` would be off). A face on a
 wall has no mouse; the day a warped, mouse-driven picture exists, invert the
 homography at the boundary.
+
+---
+
+## 2026-09-20 — Hot reload: state survives an edit, by name, on both sides
+
+`vybe run` now follows the patch's file as it is saved. The brief called
+"state survives re-description" *the most important core decision* the
+installation forces; this is its second half. The first half was the GPU's
+(key = identity: a node whose name and kind survive keeps its feedback trail).
+This half is the player's, and it is the **same rule**: `Player::reload` builds a
+fresh player from the edited patch and carries over, *by node name*, the gate and
+ramp states, this frame's values and symbols, the playhead of any sequence that
+is still the same files, and the scene that was showing (if it still exists).
+
+Three choices worth keeping:
+
+- **Objects are retunable, not rebuilt.** `Ramp::set` / `Gate::set_debounce` are
+  applied every frame, so editing `up 3s` to `up 1.75s` takes effect on a ramp
+  that is mid-climb *without* resetting its value. (It also means a duration can
+  be a Scalar.) A node that changes *kind* simply starts over as the new kind.
+- **Editing a condition never fires it.** After a reload every transition's
+  memory is set to what its condition reads *now*, so a newly written
+  `two -> one  go = 1` whose condition is already true waits to *become* true.
+  An edit is not an event.
+- **A broken save changes nothing.** A file that doesn't parse or check prints
+  its findings (warnings and errors only — notes were read at start-up) and the
+  last good patch plays on. On a wall, a typo must not black out a face.
+
+Polling the file's mtime four times a second, from the player itself: std-only,
+no watcher dependency, no thread. Headless renders never watch — a render is one
+fixed take. A changed `out` line (size, port) says "restart to apply".

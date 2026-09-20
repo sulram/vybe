@@ -22,3 +22,6 @@
 /examples/patches/map-show/media/principal/
 # A face's calibration is per machine
 /examples/patches/**/config/
+
+# Real footage for map-show stays local (large; not ours to publish)
+/examples/patches/map-show/media/video/

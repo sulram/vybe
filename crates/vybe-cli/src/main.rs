@@ -1,7 +1,7 @@
 //! `vybe` — the patch's command line.
 //!
 //!   vybe check  face.vy                     read it for mistakes (no GPU)
-//!   vybe run    face.vy --key space=/hands  play it in a window
+//!   vybe run    face.vy --key space=/hands  play it in a window; edit the file and it follows
 //!   vybe render face.vy --at 0s,2s,4.5s --osc "/hands 1 @1s" --out frames/
 //!   vybe api                                the whole vocabulary, to paste into a model's context
 //!   vybe grammar                            the TextMate grammar, generated from that vocabulary
@@ -28,7 +28,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Play a patch in a window (hot keys stand in for sensors)
+    /// Play a patch in a window; it reloads when the file is saved, keeping its
+    /// state (hot keys stand in for sensors)
     Run {
         patch: PathBuf,
         /// Map a key onto an input while held: `--key space=/hands`
@@ -145,7 +146,12 @@ fn base_of(path: &Path) -> &Path {
 fn stage(path: &Path, patch: Patch, listen: bool) -> Result<Stage, String> {
     let base = base_of(path);
     let out = patch.out.clone();
-    let mut stage = Player::new(patch, base).stage().title(&format!(
+    // A window follows the file as it is edited; a render is one fixed take.
+    let player = match listen {
+        true => Player::new(patch, base).watch(path),
+        false => Player::new(patch, base),
+    };
+    let mut stage = player.stage().title(&format!(
         "vybe — {}",
         path.file_name().unwrap_or_default().to_string_lossy()
     ));

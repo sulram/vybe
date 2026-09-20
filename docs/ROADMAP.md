@@ -62,9 +62,12 @@ of the 0.0.2 design brief. Acceptance: `vybe render map-show.vy --osc
 - [ ] `vybe check --scenario hands.toml`: 60 s of behaviour in a blink
       (`Player::advance` already runs GPU-free) — scenes visited, dwell, stuck
       fades. State bugs are invisible in a PNG and obvious here.
-- [ ] Hot reload of a running patch by node-name diff (the GPU half exists: it
-      *is* key = identity; missing: watch the file, swap the `Patch`, keep the
-      player's objects by name).
+- [x] Hot reload: `vybe run` follows the file as it is saved. State carries over
+      **by name** on both sides — GPU nodes (key = identity) and the player's
+      objects: a ramp keeps its value (with the new timing), a sequence its
+      playhead, the showing scene stays. A save that doesn't parse or check
+      prints its findings and the last good patch plays on. Editing a condition
+      never fires it.
 - [ ] `vybe fmt` (canonical spacing, so patches diff cleanly); `vybe set`.
 - [ ] `Param`: a `tune` that persists (TOML) and is addressable as
       `/param/<name>` (incoming is handled; persistence + announce are not).

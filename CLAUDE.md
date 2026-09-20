@@ -47,6 +47,7 @@ settled decisions in [DECISIONS.md](docs/DECISIONS.md); what we intend to build 
 - Picked knobs, live: `cargo run --example <dots_tune|dots_tune_xy>` (examples always
   carry the panel via the self dev-dependency; the lib never does)
 - Run a patch: `cargo run -p vybe-cli -- run examples/patches/<name>/<name>.vy`
+  — it hot-reloads on save, keeping state by name; a broken save keeps the last good patch
   (`hello`, `trails`, `stack`, `scenes`, `map-cube`, `map-screen`, `map-show`)
 - Two windows (face + remote): `scripts/face-and-remote.sh [patch] [run flags]`
   (default: `map-cube`; closing either window stops both)

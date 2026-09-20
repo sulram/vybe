@@ -13,7 +13,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use super::vocabulary::{self, EffectKind, Family, ModKind, SourceKind};
-use super::{Body, Comp, Expr, Item, Patch, Scalar, Source, Term, What, resolve_frames};
+use super::{
+    Body, Comp, Expr, Item, Patch, Scalar, Severity, Source, Term, What, check, parse,
+    resolve_frames,
+};
 use crate::input::{Inputs, Value};
 use crate::objects::{Fader, Gate, Ramp, smooth};
 use crate::recipe::{CompositeLayer, Fit, Image, Recipe, Stroke};
@@ -45,7 +48,21 @@ pub struct Player {
     /// Pixels per scene unit — what `px` resolves against.
     unit_px: f32,
     time: f32,
+    /// Where media paths resolve from — kept for [`Player::reload`].
+    base: PathBuf,
+    watch: Option<Watch>,
 }
+
+/// A patch file being watched for edits (see [`Player::watch`]).
+struct Watch {
+    path: PathBuf,
+    seen: Option<std::time::SystemTime>,
+    /// Seconds since the file was last looked at.
+    since: f32,
+}
+
+/// How often a watched patch is looked at, in seconds.
+const WATCH_EVERY: f32 = 0.25;
 
 struct SceneDef {
     name: String,
@@ -197,6 +214,8 @@ impl Player {
             clips,
             unit_px,
             time: 0.0,
+            base: base.to_owned(),
+            watch: None,
             patch,
         }
     }
@@ -205,6 +224,103 @@ impl Player {
     pub fn unit_px(mut self, pixels: f32) -> Self {
         self.unit_px = pixels.max(1.0);
         self
+    }
+
+    /// Watches `path` (the patch's own file) and [`reload`](Player::reload)s
+    /// whenever it is saved. A save that doesn't parse or check prints its
+    /// findings and changes nothing — the show goes on with the last good patch.
+    pub fn watch(mut self, path: &Path) -> Self {
+        self.watch = Some(Watch {
+            seen: modified(path),
+            path: path.to_owned(),
+            since: 0.0,
+        });
+        self
+    }
+
+    /// Swaps in an edited patch **without restarting the performance**. State is
+    /// carried over by name — the same rule that keeps a node's pixels alive on
+    /// the GPU (key = identity): a Scalar keeps its gate or ramp (with the new
+    /// timings), a sequence that is still the same files keeps its playhead, and
+    /// the scene that was showing still shows, if it still exists. Editing a
+    /// condition never *fires* it: a transition only fires when its condition
+    /// becomes true afterwards.
+    pub fn reload(&mut self, patch: Patch) {
+        let showing = self.scene().to_owned();
+        let mut next = Player::new(patch, &self.base);
+        next.unit_px = self.unit_px;
+        next.time = self.time;
+        next.watch = self.watch.take();
+        next.states = std::mem::take(&mut self.states);
+        next.values = std::mem::take(&mut self.values);
+        next.symbols = std::mem::take(&mut self.symbols);
+        for (key, clip) in &mut next.clips {
+            if let Some(old) = self.clips.get(key).filter(|old| old.frames == clip.frames) {
+                clip.playhead = old.playhead;
+            }
+        }
+        if let Some(index) = next.scenes.iter().position(|s| s.name == showing) {
+            next.fader = Fader::new(index);
+        }
+        next.held = next
+            .patch
+            .transitions
+            .iter()
+            .map(|t| t.cond.iter().all(|term| next.holds(term)))
+            .collect();
+        *self = next;
+    }
+
+    /// Looks at the watched file now and then; reloads it when it was saved.
+    fn poll(&mut self, dt: f32) {
+        let Some(watch) = &mut self.watch else {
+            return;
+        };
+        watch.since += dt;
+        if watch.since < WATCH_EVERY {
+            return;
+        }
+        watch.since = 0.0;
+        // Mid-save the file may be missing for an instant; that is not an edit.
+        let Some(now) = modified(&watch.path) else {
+            return;
+        };
+        if watch.seen == Some(now) {
+            return;
+        }
+        watch.seen = Some(now);
+        let path = watch.path.clone();
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            return;
+        };
+        let (patch, found) = match parse(&text) {
+            Ok(patch) => {
+                let found = check(&patch, &self.base);
+                (Some(patch), found)
+            }
+            Err(errors) => (None, errors),
+        };
+        // Notes were read when the patch first ran; on every save, only what
+        // needs attention is worth repeating.
+        for finding in found.iter().filter(|d| d.severity > Severity::Note) {
+            eprintln!("{}: {finding}", path.display());
+        }
+        match patch {
+            Some(patch) if !found.iter().any(|d| d.severity == Severity::Error) => {
+                if patch.out != self.patch.out {
+                    eprintln!(
+                        "{}: the `out` line changed — restart to apply it",
+                        path.display()
+                    );
+                }
+                self.reload(patch);
+                eprintln!("{}: reloaded", path.display());
+            }
+            _ => eprintln!(
+                "{}: not reloaded — still playing the last good patch",
+                path.display()
+            ),
+        }
     }
 
     /// The scene showing now (during a fade: the one arriving).
@@ -243,6 +359,7 @@ impl Player {
     /// Advances the performance by `dt` without describing the picture — what
     /// a scenario check runs on: 60 s of behaviour in a blink, no GPU.
     pub fn advance(&mut self, inputs: &Inputs, time: f32, dt: f32) {
+        self.poll(dt);
         self.time = time;
         self.scalars(inputs, dt);
         for clip in self.clips.values_mut() {
@@ -283,13 +400,19 @@ impl Player {
                         // Debounced, it is a gate: 0 or 1, and it says when it rose.
                         Some(seconds) => {
                             let seconds = self.eval(seconds);
-                            let State::Gate(gate) = self
+                            // (A reload may have turned this node from a ramp
+                            // into a gate: then it starts over as one.)
+                            let state = self
                                 .states
                                 .entry(name.clone())
-                                .or_insert_with(|| State::Gate(Gate::new(seconds)))
-                            else {
-                                unreachable!("an input's state is a gate");
+                                .or_insert_with(|| State::Gate(Gate::new(seconds)));
+                            if !matches!(state, State::Gate(_)) {
+                                *state = State::Gate(Gate::new(seconds));
+                            }
+                            let State::Gate(gate) = state else {
+                                unreachable!("just made sure it is a gate");
                             };
+                            gate.set_debounce(seconds);
                             gate.update(raw > 0.5, dt);
                             f32::from(u8::from(gate.on()))
                         }
@@ -299,13 +422,17 @@ impl Player {
                 Scalar::Ramp { gate, up, down } => {
                     let open = self.value(gate) > 0.5;
                     let (up, down) = (self.eval(up), self.eval(down));
-                    let State::Ramp(ramp) = self
+                    let state = self
                         .states
                         .entry(name.clone())
-                        .or_insert_with(|| State::Ramp(Ramp::new(up, down)))
-                    else {
-                        unreachable!("a ramp's state is a ramp");
+                        .or_insert_with(|| State::Ramp(Ramp::new(up, down)));
+                    if !matches!(state, State::Ramp(_)) {
+                        *state = State::Ramp(Ramp::new(up, down));
+                    }
+                    let State::Ramp(ramp) = state else {
+                        unreachable!("just made sure it is a ramp");
                     };
+                    ramp.set(up, down);
                     ramp.update(open, dt);
                     ramp.value()
                 }
@@ -600,6 +727,11 @@ impl Player {
     }
 }
 
+/// When the file was last written, if it can be read right now.
+fn modified(path: &Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 /// Strokes with an item's opacity folded into them.
 fn faded(mut strokes: Vec<Stroke>, alpha: f32) -> Vec<Stroke> {
     for stroke in &mut strokes {
@@ -775,6 +907,107 @@ mod tests {
         run.set("/go", "1");
         run.run(0.1);
         assert_eq!(run.player.scene(), "two");
+    }
+
+    #[test]
+    fn an_edit_keeps_the_performance_where_it_was() {
+        let base = fake_frames("reload", 60);
+        let mut run = Run::new(FACE, &base);
+        run.set("/hands", "1");
+        run.run(1.5);
+        assert_eq!(run.player.scene(), "touch");
+        let t = run.player.value("t");
+        let playhead = run.player.clips["clip"].playhead;
+
+        // Retime the ramp, recolour a node, add a scene: a live edit.
+        let edited = FACE
+            .replace("up 3s down 1.2s", "up 1.75s down 1.2s")
+            .replace("circle .1 soft 1", "circle .2 soft 1 hue 40")
+            + "\nextra : ss";
+        run.player.reload(parse(&edited).expect("parses"));
+
+        // Same scene, same ramp value, same playhead — nothing restarted…
+        assert_eq!(run.player.scene(), "touch");
+        assert_eq!(run.player.value("t"), t);
+        assert_eq!(run.player.clips["clip"].playhead, playhead);
+        // …and the new timing is live. From t ≈ .47 the ramp needs ≈ .92 s at
+        // the new `up 1.75s`; at the old 3 s it would need 1.58 s.
+        run.run(1.0);
+        assert_eq!(run.player.scene(), "play");
+        std::fs::remove_dir_all(base).unwrap();
+    }
+
+    #[test]
+    fn editing_a_condition_does_not_fire_it() {
+        let text = "go = osc /go\na = circle .1\nb = circle .2\none : a\ntwo : b\none -> two  go rise  cut";
+        let mut run = Run::new(text, Path::new("."));
+        run.set("/go", "1");
+        run.run(0.1);
+        assert_eq!(run.player.scene(), "two");
+        // While `go` is still held, a new way back appears whose condition is
+        // already true. It must wait to *become* true.
+        let edited = format!("{text}\ntwo -> one  go = 1  cut");
+        run.player.reload(parse(&edited).expect("parses"));
+        run.run(0.1);
+        assert_eq!(run.player.scene(), "two");
+        run.set("/go", "0");
+        run.run(0.1);
+        run.set("/go", "1");
+        run.run(0.1);
+        assert_eq!(run.player.scene(), "one");
+    }
+
+    #[test]
+    fn a_node_that_changes_kind_starts_over_instead_of_panicking() {
+        let mut run = Run::new(
+            "g = osc /g debounce .01\nx = ramp g up 1s down 1s\na = circle .1",
+            Path::new("."),
+        );
+        run.set("/g", "1");
+        run.run(0.5);
+        // `x` was a ramp; now it is a gate.
+        run.player.reload(
+            parse("g = osc /g debounce .01\nx = osc /g debounce .01\na = circle .1")
+                .expect("parses"),
+        );
+        run.run(0.1);
+        assert_eq!(run.player.value("x"), 1.0);
+    }
+
+    #[test]
+    fn a_saved_file_reloads_and_a_broken_save_changes_nothing() {
+        let dir = std::env::temp_dir().join(format!("vybe-watch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("live.vy");
+        let save = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            // Make sure the timestamp moves even on a coarse clock.
+            let later = std::time::SystemTime::now() + std::time::Duration::from_secs(2);
+            std::fs::File::options()
+                .write(true)
+                .open(&file)
+                .unwrap()
+                .set_modified(later)
+                .unwrap();
+        };
+        std::fs::write(&file, "a = circle .1").unwrap();
+        let patch = parse("a = circle .1").unwrap();
+        let mut run = Run {
+            player: Player::new(patch, &dir).watch(&file),
+            inputs: Inputs::default(),
+            frame: 0,
+        };
+        run.run(0.5);
+        assert_eq!(run.player.scene(), "a");
+
+        save("a = circle .1\nb = circle .2 hue 40");
+        run.run(0.5);
+        assert_eq!(run.player.scene(), "b"); // the new last node shows
+
+        save("a = circle .1\nb = circle sofft"); // a typo, mid-thought
+        run.run(0.5);
+        assert_eq!(run.player.scene(), "b"); // the last good patch plays on
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

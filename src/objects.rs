@@ -43,6 +43,12 @@ impl Gate {
         }
     }
 
+    /// Retunes the debounce without touching the gate's state — so a patch
+    /// edited while it runs keeps its gate open.
+    pub fn set_debounce(&mut self, debounce: f32) {
+        self.debounce = debounce.max(0.0);
+    }
+
     /// Feeds this frame's raw input. Call exactly once per frame: edges last
     /// until the next update.
     pub fn update(&mut self, raw: bool, dt: f32) {
@@ -99,6 +105,13 @@ impl Ramp {
             down: down.max(0.0),
             value: 0.0,
         }
+    }
+
+    /// Retunes the durations without touching the value — so a patch edited
+    /// while it runs keeps its ramp where it was.
+    pub fn set(&mut self, up: f32, down: f32) {
+        self.up = up.max(0.0);
+        self.down = down.max(0.0);
     }
 
     pub fn update(&mut self, open: bool, dt: f32) {

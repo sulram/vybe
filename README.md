@@ -40,7 +40,8 @@ And the loop that makes it writable by something that can't see a screen:
 ```
 vybe check  face.vy                                   # mistakes, before any GPU work
 vybe render face.vy --at 0s,2s,4.5s --osc "/hands 1 @1s" --out frames/
-vybe run    face.vy --key space=/hands                # a key stands in for the sensor
+vybe run    face.vy --key space=/hands                # a key stands in for the sensor;
+                                                      # save the file and the window follows
 vybe api                                              # the whole vocabulary, for a model's context
 ```
 
