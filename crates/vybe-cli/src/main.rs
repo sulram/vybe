@@ -35,6 +35,10 @@ enum Command {
         /// Map a key onto an input while held: `--key space=/hands`
         #[arg(long = "key", value_name = "KEY=/ADDRESS")]
         keys: Vec<String>,
+        /// Open on the whole screen, borderless — whatever the saved mapping
+        /// says (Escape, or F in the remote, leaves it)
+        #[arg(long)]
+        fullscreen: bool,
     },
     /// Render a patch headless, on a fixed clock, to PNGs
     Render {
@@ -79,7 +83,11 @@ fn main() -> ExitCode {
             Ok(())
         }
         Command::Check { patch } => load(&patch).map(|_| println!("{}: ok", patch.display())),
-        Command::Run { patch, keys } => run(&patch, &keys),
+        Command::Run {
+            patch,
+            keys,
+            fullscreen,
+        } => run(&patch, &keys, fullscreen),
         Command::Render {
             patch,
             at,
@@ -179,7 +187,7 @@ fn stage(path: &Path, patch: Patch, listen: bool) -> Result<Stage, String> {
         let rest = Keystone {
             output,
             corners: stage.rest(output.map(|px| px as f32)).corners,
-            feather: 0.0,
+            ..Keystone::default()
         };
         match out.remote {
             Some(port) if listen => {
@@ -201,8 +209,8 @@ fn stage(path: &Path, patch: Patch, listen: bool) -> Result<Stage, String> {
     Ok(stage)
 }
 
-fn run(path: &Path, keys: &[String]) -> Result<(), String> {
-    let mut stage = stage(path, load(path)?, true)?;
+fn run(path: &Path, keys: &[String], fullscreen: bool) -> Result<(), String> {
+    let mut stage = stage(path, load(path)?, true)?.fullscreen(fullscreen);
     for mapping in keys {
         let bad = || format!("--key {mapping}: expected KEY=/ADDRESS, like `space=/hands`");
         let (key, address) = mapping.split_once('=').ok_or_else(bad)?;

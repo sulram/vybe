@@ -11,9 +11,14 @@
 //!   "version": 1,
 //!   "output": [1920, 1200],
 //!   "corners": [[0, 0], [1, 0], [1, 1], [0, 1]],
-//!   "feather": 0
+//!   "feather": 0,
+//!   "fullscreen": true
 //! }
 //! ```
+//!
+//! It is the *room's* half of a work — everything that differs from one
+//! machine to the next: where the picture lands, and whether this player takes
+//! the whole screen when it starts.
 //!
 //! `corners` are TL, TR, BR, BL, each a fraction of the output, y downward. A
 //! 4-corner homography is exact for a flat face, so that is the whole model:
@@ -42,6 +47,9 @@ pub struct Keystone {
     pub corners: [[f32; 2]; 4],
     /// Soft edge, as a fraction of the picture.
     pub feather: f32,
+    /// Start on the whole screen, borderless — what a face on a wall wants,
+    /// and a laptop on a desk doesn't.
+    pub fullscreen: bool,
 }
 
 impl Default for Keystone {
@@ -51,6 +59,7 @@ impl Default for Keystone {
             output: [1920, 1200],
             corners: [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]],
             feather: 0.0,
+            fullscreen: false,
         }
     }
 }
@@ -122,11 +131,12 @@ impl Keystone {
             .map(|[x, y]| format!("[{x}, {y}]"))
             .collect();
         format!(
-            "{{\n  \"version\": {VERSION},\n  \"output\": [{}, {}],\n  \"corners\": [{}],\n  \"feather\": {}\n}}\n",
+            "{{\n  \"version\": {VERSION},\n  \"output\": [{}, {}],\n  \"corners\": [{}],\n  \"feather\": {},\n  \"fullscreen\": {}\n}}\n",
             self.output[0],
             self.output[1],
             corners.join(", "),
             self.feather,
+            self.fullscreen,
         )
     }
 
@@ -174,6 +184,10 @@ impl Keystone {
         if let Some(feather) = root.get("feather").and_then(Json::number) {
             keystone.feather = feather as f32;
         }
+        // Absent in files written before it existed: a window, as before.
+        if let Some(fullscreen) = root.get("fullscreen").and_then(Json::boolean) {
+            keystone.fullscreen = fullscreen;
+        }
         Ok(keystone)
     }
 }
@@ -194,6 +208,7 @@ mod tests {
             output: [1920, 1200],
             corners: [[0.02, 0.01], [0.97, 0.0], [1.0, 0.98], [-0.01, 1.0]],
             feather: 0.05,
+            fullscreen: true,
         };
         assert_eq!(Keystone::parse(&keystone.to_json()).unwrap(), keystone);
     }

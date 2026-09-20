@@ -58,7 +58,7 @@ fi
 remote=$!
 
 echo "face: $patch   remote: 127.0.0.1:$port   (close either window to stop)"
-echo "remote keys: drag a corner | TAB + arrows (SHIFT = 10 px) | G grid  W white  H gray  SPACE show | S save  R reload  0 reset"
+echo "remote keys: drag a corner | TAB + arrows (SHIFT = 10 px) | G grid  W white  H gray  SPACE show | S save  R reload  0 reset  F fullscreen"
 
 # Whichever window closes first takes the other with it.
 while kill -0 "$face" 2>/dev/null && kill -0 "$remote" 2>/dev/null; do

@@ -52,6 +52,8 @@ pub(crate) struct Show {
     /// the output, whatever size that turns out to be.
     pub picture: Option<[u32; 2]>,
     pub title: Option<String>,
+    /// Open on the whole screen, borderless.
+    pub fullscreen: bool,
 }
 
 impl Show {
@@ -62,6 +64,7 @@ impl Show {
             size: [800.0, 800.0],
             picture: None,
             title: None,
+            fullscreen: false,
         }
     }
 
@@ -123,6 +126,7 @@ impl Show {
             pointer: [1e9, 1e9],
             shift: false,
             last: (0.0, 0.0),
+            fullscreen: None,
         };
         event_loop.run_app(&mut app).unwrap();
     }
@@ -141,6 +145,8 @@ struct App {
     shift: bool,
     /// The last frame's (time, dt) — what an event between frames is stamped with.
     last: (f32, f32),
+    /// A binding asked for (or out of) the whole screen; applied next frame.
+    fullscreen: Option<bool>,
 }
 
 impl App {
@@ -175,10 +181,12 @@ impl App {
             time: self.last.0,
             dt: self.last.1,
             title: None,
+            fullscreen: None,
         };
         for binding in &mut self.show.bindings {
             binding.event(&event, &mut io);
         }
+        self.fullscreen = io.fullscreen.or(self.fullscreen);
     }
 }
 
@@ -199,8 +207,16 @@ impl ApplicationHandler for App {
                 self.show.size[1],
             ));
         let window = Arc::new(event_loop.create_window(attrs).unwrap());
+        if self.show.fullscreen {
+            set_fullscreen(&window, true);
+        }
         #[allow(unused_mut)]
-        let mut state = pollster::block_on(State::new(window.clone(), recipe, self.show.picture));
+        let mut state = pollster::block_on(State::new(
+            window.clone(),
+            recipe,
+            self.show.picture,
+            self.show.size,
+        ));
         state.engine().preload(&self.show.media());
 
         // A live sketch with picked knobs gets the tweak panel — an Overlay
@@ -250,6 +266,14 @@ impl ApplicationHandler for App {
                 pressed: button_state == ElementState::Pressed,
                 at: self.pointer,
             }),
+            // The way out that needs no remote: Escape leaves the whole screen.
+            WindowEvent::KeyboardInput { event: key, .. }
+                if key.logical_key == WinitKey::Named(NamedKey::Escape)
+                    && key.state == ElementState::Pressed
+                    && state.window.fullscreen().is_some() =>
+            {
+                set_fullscreen(&state.window, false);
+            }
             WindowEvent::KeyboardInput { event: key, .. } if !consumed => {
                 if let Some(named) = translate(&key.logical_key) {
                     self.dispatch(Event::Key {
@@ -269,12 +293,16 @@ impl ApplicationHandler for App {
                     time,
                     dt,
                     title: None,
+                    fullscreen: None,
                 };
                 for binding in &mut self.show.bindings {
                     binding.frame(&mut io);
                 }
                 if let Some(title) = io.title.take() {
                     state.window.set_title(&title);
+                }
+                if let Some(whole) = io.fullscreen.or(self.fullscreen.take()) {
+                    set_fullscreen(&state.window, whole);
                 }
                 if let Some(recipe) = self.show.describe(&self.inputs, time, dt, false) {
                     state.engine().set_recipe(recipe);
@@ -286,6 +314,14 @@ impl ApplicationHandler for App {
             _ => {}
         }
     }
+}
+
+/// The whole screen, borderless, on whichever monitor the window is on — with
+/// the cursor out of the picture — or back to a window.
+fn set_fullscreen(window: &Window, whole: bool) {
+    let mode = whole.then(|| winit::window::Fullscreen::Borderless(None));
+    window.set_fullscreen(mode);
+    window.set_cursor_visible(!whole);
 }
 
 /// winit's key -> ours. Keys we have no name for are simply not events.

@@ -12,7 +12,8 @@
 //!   cargo run -p vybe-remote -- 192.168.0.12:9001  # a face on the network
 //!
 //! drag a corner · arrows 1 px · shift 10 px · tab next corner
-//! S save · R reload · 0 reset to rest · G grid / W white / H gray · space back to the show
+//! S save · R reload · 0 reset to rest · F fullscreen (saved with S)
+//! G grid / W white / H gray · space back to the show
 
 use std::net::{SocketAddr, ToSocketAddrs};
 
@@ -121,6 +122,7 @@ fn main() {
     .on(Key::Char('s'), tell(&peer, "/keystone/save"))
     .on(Key::Char('r'), tell(&peer, "/keystone/reload"))
     .on(Key::Char('0'), tell(&peer, "/keystone/reset"))
+    .on(Key::Char('f'), tell(&peer, "/stage/fullscreen"))
     .on(Key::Char('g'), mode(&peer, "grid"))
     .on(Key::Char('w'), mode(&peer, "white"))
     .on(Key::Char('h'), mode(&peer, "gray"))

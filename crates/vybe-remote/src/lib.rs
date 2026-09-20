@@ -14,6 +14,7 @@
 //! | remote → face | `/keystone/save`    |            | atomic write + `.bak`; reply `/keystone/saved ok` |
 //! | remote → face | `/keystone/reload`  |            | drop RAM state, re-read the file            |
 //! | remote → face | `/keystone/reset`   |            | back to rest (uncalibrated), RAM only; reply `/keystone/state` |
+//! | remote → face | `/stage/fullscreen` | `[0\|1]`   | the whole screen, borderless, or a window; no argument toggles. RAM only — `/keystone/save` keeps it, so the face *opens* that way |
 //! | remote → face | `/param/<name>`     | `v`        | turns a `tune`                              |
 //! | anyone → face | anything else       | `v`        | lands in the patch's inputs (`/hands 1`, `/mode grid`) |
 //!
@@ -72,6 +73,8 @@ pub struct Face {
     rest: Keystone,
     /// The picture's own size, px — what the four corners are the corners *of*.
     picture: [u32; 2],
+    /// The window mode to ask the stage for on the next frame.
+    fullscreen: Option<bool>,
     /// Where `/keystone/save` writes. `None`: calibration lives in RAM only.
     path: Option<PathBuf>,
 }
@@ -97,6 +100,8 @@ impl Face {
         };
         Ok(Self {
             osc,
+            // A face opens the way its room saved it.
+            fullscreen: keystone.fullscreen.then_some(true),
             keystone,
             rest,
             picture,
@@ -146,15 +151,33 @@ impl Face {
             "/keystone/reload" => {
                 if let Some(path) = &self.path {
                     match Keystone::load_or(path, self.rest.clone()) {
-                        Ok(keystone) => self.keystone = keystone,
+                        Ok(keystone) => {
+                            if keystone.fullscreen != self.keystone.fullscreen {
+                                self.fullscreen = Some(keystone.fullscreen);
+                            }
+                            self.keystone = keystone;
+                        }
                         Err(e) => eprintln!("vybe: {e}"),
                     }
                 }
                 reply(&self.osc, state_message(&self.keystone));
             }
             "/keystone/reset" => {
-                self.keystone = self.rest.clone();
+                // The corners go back to rest; how the window opens is not a
+                // calibration, and stays.
+                self.keystone = Keystone {
+                    fullscreen: self.keystone.fullscreen,
+                    ..self.rest.clone()
+                };
                 reply(&self.osc, state_message(&self.keystone));
+            }
+            "/stage/fullscreen" => {
+                let whole = match message.number(0) {
+                    Some(value) => value > 0.5,
+                    None => !self.keystone.fullscreen,
+                };
+                self.keystone.fullscreen = whole;
+                self.fullscreen = Some(whole);
             }
             address => {
                 let Some(arg) = message.args.first() else {
@@ -181,6 +204,9 @@ impl Binding for Face {
     fn frame(&mut self, io: &mut Io<'_>) {
         while let Some((message, from)) = self.osc.recv() {
             self.handle(&message, from, io);
+        }
+        if let Some(whole) = self.fullscreen.take() {
+            io.fullscreen = Some(whole);
         }
         *io.warp = Warp {
             corners: self.keystone.corners,
@@ -245,6 +271,8 @@ impl Peer {
         let mut state = self.0.borrow_mut();
         // The face answers a reload or a reset with the state it now holds.
         state.adopt |= matches!(address, "/keystone/reload" | "/keystone/reset");
+        // How the face opens is saved with the corners: it is unsaved now.
+        state.dirty |= address == "/stage/fullscreen";
         let _ = state
             .osc
             .send(state.face, &Message::new(address, word.map(Arg::from)));

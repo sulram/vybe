@@ -25,6 +25,23 @@ of the 0.0.2 design brief. Acceptance: `vybe render map-show.vy --osc
 "/hands 1 @1s"` shows idle → touch → play on a Mac, no Pi, no GStreamer — **met**
 (`examples/patches/map-show/`).
 
+### Pick up here (agreed order, 2026-09-20)
+
+1. **`vybe check --scenario`** — 60 s of behaviour in a blink, no GPU
+   (`Player::advance` already runs that way in the tests): scenes visited,
+   dwell time, stuck fades. Catches what a PNG can't show. Cheap; do it first.
+2. **`text` + `Draw`/`canvas()` + `rust <name>` leaves** — the biggest one.
+   Unlocks the remote's status line (it lives in the window title today), labels
+   on the calibration grid, the loading ring. **Open decision, the artist's:**
+   the embedded font — a free mono (JetBrains Mono / IBM Plex Mono, ~100–300 KB
+   in the crate) or a dependency-free 5×7 bitmap font.
+3. **Installation leftovers** — which monitor goes fullscreen; the audio device
+   per video (a USB DAC per face); a transition's one-shot sound.
+4. **Housekeeping** — split `gpu.rs`, `vybe fmt`, a persistent `Param`.
+5. **The player, packaged** (the "TouchPlayer" of vybe) — see below.
+
+The detailed items follow.
+
 - [x] `vybe render`: headless, fixed `Clock`, scripted inputs (`--osc`), PNG out;
       identical across runs. Also `VYBE_RENDER=…` on any `.rs` example.
 - [x] GPU core as one keyed node list (replaces `Passes` + `Layer`); **key =
@@ -50,6 +67,10 @@ of the 0.0.2 design brief. Acceptance: `vybe render map-show.vy --osc
       size, rests contained, and the keystone maps *its* corners (within a pixel,
       measured). The remote learns any face's shape over OSC — `map-cube`
       (square) and `map-screen` (16:9) are one tool. DECISIONS 2026-09-20 (2nd).
+- [x] Fullscreen from the remote (`F` → `/stage/fullscreen`), saved with the
+      mapping so a face opens that way; `vybe run --fullscreen`; Escape leaves;
+      a fixed picture's output letterboxes instead of stretching.
+- [ ] Choose WHICH monitor goes fullscreen (today: the one the window is on).
 - [ ] Un-project the mouse through the warp (only matters for a warped,
       mouse-driven picture — none exists yet).
 - [ ] A `grid` that fills a non-square picture (today it spans the unit square;
@@ -77,6 +98,40 @@ of the 0.0.2 design brief. Acceptance: `vybe render map-show.vy --osc
       clean cut. LLM-sized is a rule, not a wish.
 - [ ] Colour: `gray .5` is *linear* .5 (≈ 74 % on screen). Decide whether paint
       knobs should be perceptual before a calibration pattern depends on it.
+
+## The player, packaged — open a `.vy` like a document
+
+`vybe` already *is* the player: a `.vy` needs no compiler (measured 2026-09-20:
+the release binary is 7.4 MB and, built without video, links against nothing
+but the OS — copy it to another machine and run). What is missing is the last
+metre, smallest first:
+
+- [ ] **`vybe show.vy`** — `run` becomes the *default*, not removed. Rule: the
+      first argument is a command if it names one (`run render check api
+      grammar`); otherwise, an existing file or a `*.vy` is an implicit `run`.
+      (A patch literally named `check` needs `vybe run check`.) The flags must
+      work in both spellings — one shared clap args struct, and a test that
+      `vybe x.vy --fullscreen --key space=/hands` equals the `run` form. Explicit
+      `run` stays for scripts and systemd units. Prerequisite for the next item:
+      an OS opens a document by passing its path as the first argument.
+- [ ] **A macOS `.app`** with the `.vy` file association (`Info.plist`, icon;
+      `cargo-bundle` or by hand): double-click a patch and it plays. ~half a day.
+- [ ] **GStreamer inside the `.app`** — the only hard part of "all in one":
+      ~100–200 MB of dylibs and plugins to copy and re-path
+      (`install_name_tool`), `GST_PLUGIN_PATH` set at start-up. Do it when there
+      is someone to hand the app to who won't `brew install`; not before.
+- [ ] On the Pi none of that applies: `apt install` GStreamer, copy the binary,
+      a systemd unit running `vybe run show.vy --fullscreen`.
+
+**`.rs` will never open on the fly** — Rust is compiled. `vybe run sketch.rs`
+could shell out to cargo (needs the toolchain on the machine; first build ~1
+min), which is a convenience, not a player. That is the reason the patch exists:
+the `.vy` is the format that needs no compiler, and Rust is for what a patch
+can't say, compiled *into* the player as `rust <name>` leaves (TouchDesigner's
+`.toe` vs. a custom C++ operator). An example is already a standalone
+executable: `cargo build --release --example feedback` →
+`target/release/examples/feedback` (12 MB, OS frameworks only); one binary per
+OS/architecture, so for the Pi build there or use `cross`.
 
 ## Next — 0.0.3: "the patch runs on the wall"
 

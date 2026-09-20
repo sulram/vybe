@@ -15,6 +15,8 @@ struct Side<B: Binding> {
     binding: B,
     inputs: Inputs,
     warp: Warp,
+    /// The last window mode the binding asked its stage for.
+    fullscreen: Option<bool>,
 }
 
 impl<B: Binding> Side<B> {
@@ -23,6 +25,7 @@ impl<B: Binding> Side<B> {
             binding,
             inputs: Inputs::default(),
             warp: Warp::default(),
+            fullscreen: None,
         }
     }
 
@@ -33,8 +36,10 @@ impl<B: Binding> Side<B> {
             time: 0.0,
             dt: 1.0 / 60.0,
             title: None,
+            fullscreen: None,
         };
         self.binding.frame(&mut io);
+        self.fullscreen = io.fullscreen.or(self.fullscreen);
         io.title
     }
 }
@@ -63,7 +68,7 @@ fn a_dragged_corner_reaches_the_wall_and_a_save_survives_a_restart() {
     let uncalibrated = keystone::Keystone {
         output: [1920, 1200],
         corners: Warp::fit([1200.0, 1200.0], [1920.0, 1200.0]).corners,
-        feather: 0.0,
+        ..keystone::Keystone::default()
     };
     let listen = |file| Face::listen(port, Some(file), uncalibrated.clone(), picture).unwrap();
     let mut face = Side::new(listen(file.clone()));
@@ -104,6 +109,15 @@ fn a_dragged_corner_reaches_the_wall_and_a_save_survives_a_restart() {
     assert!(title.contains("saved") && !title.contains('•'), "{title}");
     assert!(file.exists());
 
+    // F: the face takes the whole screen — live at once, unsaved until S.
+    assert_eq!(face.fullscreen, None);
+    handle.send("/stage/fullscreen", None);
+    let title = converse(&mut face, &mut peer);
+    assert_eq!(face.fullscreen, Some(true));
+    assert!(title.contains('•'), "{title}");
+    handle.send("/keystone/save", None);
+    converse(&mut face, &mut peer);
+
     // Anything that isn't protocol is the patch's input.
     handle.send("/mode", Some("grid"));
     converse(&mut face, &mut peer);
@@ -114,6 +128,7 @@ fn a_dragged_corner_reaches_the_wall_and_a_save_survives_a_restart() {
     let mut face = Side::new(listen(file));
     face.frame();
     assert_eq!(face.warp.corners[2], [0.9, 0.95]);
+    assert_eq!(face.fullscreen, Some(true)); // …and it opens the way it was saved
 
     // Reset: back to rest on the wall and in the remote's hands — RAM only, so
     // the saved calibration is still one `R` away.

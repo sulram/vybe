@@ -1267,6 +1267,8 @@ impl Presenter {
         engine: &Engine,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
+        // `[x, y, width, height]` in pixels: draw into this part of `view` only.
+        viewport: Option<[f32; 4]>,
     ) {
         let clear = if self.keep_alpha {
             wgpu::Color::TRANSPARENT
@@ -1291,6 +1293,9 @@ impl Presenter {
             .of(&engine.device, &engine.kit, picture, &self.uniforms);
         pass.set_pipeline(&self.pipeline);
         pass.set_bind_group(0, bg, &[]);
+        if let Some([x, y, width, height]) = viewport {
+            pass.set_viewport(x, y, width.max(1.0), height.max(1.0), 0.0, 1.0);
+        }
         pass.draw(0..6, 0..1);
     }
 }
@@ -1364,6 +1369,11 @@ pub(crate) struct State {
     /// shape, the warp lands the picture in it. `false`: the picture *is* the
     /// window, and follows its size.
     fixed_picture: bool,
+    /// The output's declared shape (width / height). A keystone's corners are
+    /// fractions of *that*; on a screen of another shape (a laptop gone
+    /// fullscreen) the output is letterboxed rather than stretched, or the
+    /// calibration would lie.
+    output_aspect: f32,
 }
 
 impl State {
@@ -1373,6 +1383,7 @@ impl State {
         window: Arc<Window>,
         recipe: Recipe,
         picture: Option<[u32; 2]>,
+        output: [f32; 2],
     ) -> Self {
         let size = window.inner_size();
         let (width, height) = (size.width.max(1), size.height.max(1));
@@ -1409,6 +1420,7 @@ impl State {
 
         Self {
             fixed_picture: picture.is_some(),
+            output_aspect: output[0] / output[1].max(1.0),
             window,
             surface,
             config,
@@ -1505,7 +1517,14 @@ impl State {
                 });
 
         self.engine.render(&mut encoder, time, dt);
-        self.presenter.present(&self.engine, &mut encoder, &screen);
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        let viewport = self.fixed_picture.then(|| {
+            let width = w.min(h * self.output_aspect);
+            let height = width / self.output_aspect;
+            [(w - width) * 0.5, (h - height) * 0.5, width, height]
+        });
+        self.presenter
+            .present(&self.engine, &mut encoder, &screen, viewport);
 
         // The overlay (if any) draws last, over the finished frame.
         if let Some(overlay) = &mut self.overlay {
@@ -1613,7 +1632,7 @@ impl Headless {
                 });
         self.engine.render(&mut encoder, time, dt);
         self.presenter
-            .present(&self.engine, &mut encoder, &self.view);
+            .present(&self.engine, &mut encoder, &self.view, None);
         if capture {
             encoder.copy_texture_to_buffer(
                 wgpu::TexelCopyTextureInfo {

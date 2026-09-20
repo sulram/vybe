@@ -150,7 +150,9 @@ vybe-remote` for the remote. The script passes `vybe run` flags through:
 
 Drag a corner in the remote (or TAB + arrows; SHIFT = 10 px) and the face warps;
 `G`/`W`/`H` switch test patterns, SPACE returns to the show, `S` saves the
-keystone next to the patch, `R` re-reads it, `0` goes back to uncalibrated. They speak OSC over UDP, so the face moves to
+keystone next to the patch, `R` re-reads it, `0` goes back to uncalibrated, and
+`F` sends the face fullscreen (borderless; saved with `S`, so a face on a wall
+opens that way — or force it with `vybe run … --fullscreen`; Escape leaves it). They speak OSC over UDP, so the face moves to
 another machine unchanged. The full piece: `examples/patches/map-show/` (run its
 `make-media.sh` once — vybe renders its own media).
 

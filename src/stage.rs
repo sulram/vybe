@@ -64,6 +64,12 @@ impl Stage {
         self
     }
 
+    /// Opens on the whole screen, borderless (Escape leaves it).
+    pub fn fullscreen(mut self, whole: bool) -> Self {
+        self.show.fullscreen = whole;
+        self
+    }
+
     pub fn title(mut self, title: &str) -> Self {
         self.show.title = Some(title.to_owned());
         self
@@ -309,6 +315,7 @@ impl Render {
                 time,
                 dt,
                 title: None,
+                fullscreen: None,
             };
             for binding in &mut show.bindings {
                 binding.frame(&mut io);

@@ -67,6 +67,10 @@ pub struct Io<'a> {
     pub dt: f32,
     /// Set to retitle the window (a status line, until `text` exists).
     pub title: Option<String>,
+    /// Set to take the whole screen, borderless (`true`), or go back to a
+    /// window (`false`). A face on a wall has no keyboard: this is how a remote
+    /// reaches its window.
+    pub fullscreen: Option<bool>,
 }
 
 /// A key, by what it means rather than where it sits.

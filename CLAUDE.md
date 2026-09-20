@@ -50,7 +50,9 @@ settled decisions in [DECISIONS.md](docs/DECISIONS.md); what we intend to build 
   — it hot-reloads on save, keeping state by name; a broken save keeps the last good patch
   (`hello`, `trails`, `stack`, `scenes`, `map-cube`, `map-screen`, `map-show`)
 - Two windows (face + remote): `scripts/face-and-remote.sh [patch] [run flags]`
-  (default: `map-cube`; closing either window stops both)
+  (default: `map-cube`; closing either window stops both). `F` in the remote =
+  face fullscreen (saved in `keystone.json` with `S`); `vybe run --fullscreen`
+  forces it; Escape leaves it.
 - A picture with its own size: `out … picture WxH` — renders at that size, the
   keystone's corners are ITS corners. Mapping examples paint a background, so
   the picture's edge is visible against the projector's black.

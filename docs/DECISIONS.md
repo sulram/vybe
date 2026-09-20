@@ -1003,3 +1003,30 @@ already followed. `vol` and `mute` stopped being notes and became words that wor
 With a decoder, `video` needs only its file. Without one, the error says how to
 install GStreamer. `@` on a video is refused for now: a video plays on its own
 clock with its sound; scrubbing is what `frames` is for.
+
+---
+
+## 2026-09-20 — Fullscreen from the remote, saved with the mapping
+
+A face on a wall has no keyboard, so the remote must be able to reach its
+*window*: `/stage/fullscreen [0|1]` (no argument toggles) takes the whole
+screen, borderless, cursor hidden — `F` in the remote. It travels the usual
+seam: `Face` hears the message and sets `Io::fullscreen`; the shell applies it.
+The core learned one `Option<bool>`, nothing about OSC.
+
+**It is saved in `keystone.json`**, and that settles what that file *is*: not
+"the homography" but **the room's half of a work** — everything that differs
+from one machine to the next. Where the picture lands is one such thing;
+whether this player takes the whole screen when it starts is another (a face
+does, the same patch on a desk doesn't). So `F` is live-and-unsaved like a
+dragged corner, `S` keeps both, and a face *opens* the way its room saved it.
+`/keystone/reset` returns the corners to rest and leaves the window mode alone:
+resetting a calibration shouldn't throw you out of fullscreen. Files written
+before the field existed read as "a window", as before.
+
+Three companions: `vybe run --fullscreen` forces it at start whatever is saved
+(the flag is the operator's word, the file is the room's); **Escape** leaves
+fullscreen locally — the way out that needs no remote; and an output with a
+picture of its own size is **letterboxed** on a screen of another shape rather
+than stretched — a keystone's corners are fractions of the *declared* output,
+and on a stretched one the calibration would lie.

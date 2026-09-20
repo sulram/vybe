@@ -26,6 +26,13 @@ impl Json {
         }
     }
 
+    pub(crate) fn boolean(&self) -> Option<bool> {
+        match self {
+            Json::Bool(b) => Some(*b),
+            _ => None,
+        }
+    }
+
     pub(crate) fn array(&self) -> Option<&[Json]> {
         match self {
             Json::Array(items) => Some(items),
