@@ -239,7 +239,9 @@ shell.
   Every gap the WASM path carried (no GStreamer, no OSC/UDP, WebGPU compute
   a lottery) is not solved but *absent* — and the frame brings the packaging
   the roadmap wanted: the `.app` with the `.vy` association, installers, an
-  updater. (DECISIONS 2026-09-29.)
+  updater. (DECISIONS 2026-09-29.) *Open doubt (ROADMAP, vybe-flow): the
+  first shell may be a VS Code extension instead — the engine stays native
+  either way; only the shell is in question.*
 - **JIT is hot reload with a string for a file.** Every graph edit
   regenerates the `.vy` and sends the same swap, state preserved by name;
   the last-good-patch guarantee — a broken edit dims nothing — comes free

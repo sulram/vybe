@@ -227,6 +227,20 @@ beside the `.vy`, never in the patch (DECISIONS 2026-09-29).
 - [ ] Open: fork tekne-flow's UI shell or lift the patterns into a fresh lean
       app? (The graph semantics differ enough that fresh may cost less than
       un-teaching the old one its streams.)
+- [ ] **Open — Tauri or a VS Code extension as the first shell?** The nagging
+      doubt: VS Code may already offer steps 1–3 for free. Its Custom Editor
+      API *enforces* "the text is the truth" (the `.vy` `TextDocument` is the
+      source, the graph a webview over it; undo/git/text pane built in);
+      `load_patch` is a file save (`vybe run` already watches); `set_tune` /
+      `set_input` / `status` already have a wire (the `vybe-remote` OSC
+      protocol, spoken from the extension host); check errors land in the
+      Diagnostics API beside the existing `.vy` grammar. What VS Code cannot
+      be: the packaged `.app` an artist double-clicks, or the editor served
+      by the device — those stay Tauri/host stories (step 4 and HOST-era,
+      already gated on "someone to hand it to"). Not either/or — the Svelte
+      frontend stays shell-agnostic and VS Code would be one more backend.
+      Risk to weigh: an extension makes it easy to never do the packaging
+      work. Decide at the shell spike; log the call in DECISIONS.
 
 ---
 
