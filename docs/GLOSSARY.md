@@ -43,6 +43,16 @@ The *why* lives in [README.md](../README.md); settled decisions in
 | **headless / Render** | No window: a **fixed clock**, scripted inputs, PNGs out. Same input, same pixels. `vybe render`, or `VYBE_RENDER="at=2 size=500x500"` on any example. |
 | **Clock** | The one place time is read: *wall* (real seconds; framerate-independent motion) or *fixed* (every frame exactly one step — deterministic, what headless runs on). |
 
+## The device (vybe as an appliance — planned; VISION "The device")
+
+| Term | Meaning |
+|------|---------|
+| **device** | The box on the wall: a Pi (or any KMS machine) that plays a project at power-on. The face is its picture; the **host** is what makes a computer behave like a face. |
+| **host** | `vybe-host`, the supervisor daemon (planned): a registry of projects, runs the default at power-on, supervises the player and apps as child processes, exposes the API. Owns nothing visual; a crash falls back to the default, never to black. |
+| **project** | A folder: the patch or app, its media, its `keystone.json` — everything a work needs, nothing it doesn't. The host's registry is the folders it can see; the **default project** is a pointer power-on follows. |
+| **tier** | How work reaches the device: **1** the patch (instant, checked, on device), **2** the scripted app (sandboxed, on device; Lua vs WASM undecided), **3** Rust (compiled *off* device: `rust` leaves in the player, or a supervised binary). The device never runs rustc (DECISIONS 2026-09-29). |
+| **vybe-flow** | The planned editor: a Tauri app whose webview draws the graph as a *view of the patch* — palette generated from the vocabulary, every edit regenerating the `.vy` into hot reload, the engine native, the stage the real wgpu window. The text view is the truth; the graph's layout lives in a sidecar. |
+
 ## The language (how sketches are written)
 
 | Term | Meaning |

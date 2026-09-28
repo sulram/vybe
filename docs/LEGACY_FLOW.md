@@ -6,6 +6,9 @@
   can be resumed without re-deriving it.
 - Live crumbs: DECISIONS ("Direction: vibe-coding-first…") and a ROADMAP block
   ("Imported from tekne-flow"). This is the long-form behind them.
+- 2026-09-29: the editor consciously returned as **vybe-flow** — but as a view
+  of the patch, not a rival vocabulary (VISION "The editor"; DECISIONS
+  2026-09-29). The columnar half of this reflection stands unchanged.
 
 ## What we looked at
 

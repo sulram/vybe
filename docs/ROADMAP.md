@@ -146,14 +146,87 @@ OS/architecture, so for the Pi build there or use `cross`.
 - [ ] Choose the audio device per video (a USB DAC per face → a directional
       speaker); a transition's one-shot sound (`… cut confirma.wav`).
 - [ ] Scrub a video with `@` (seek on a paused pipeline) if a work pulls it.
-- [ ] `vybe-io` GPIO.
+- [ ] **Expressions in conditions + timers** — transitions read what Scalars
+      already compose (`when /sensor/near > 0.6 & idle > 30`); `idle` source,
+      `after` condition. Installation art's most-said sentence ("after 30 s
+      idle, go to attract") becomes one line. Kata: the presence piece / the
+      attract loop — the cube's sensor scenes pull it anyway. First of the
+      language's growth order (VISION, "The language").
+- [ ] **Counters and latches** — `count`, `toggle`, `hold`: three more
+      std-only objects in the Gate/Ramp/Fader family. "Every third touch",
+      "stay until reset", "remember it happened". Kata: a wall that fills one
+      cell per visitor. Edges, not levels: editing a condition never fires it.
+- [ ] **OSC out** — `send /light/dim 0.8`: a patch that conducts other gear
+      (a DMX bridge, a sound box, the cube's other faces). A node like any
+      other: it exists, has an input, fires on edges. Kata: two faces
+      answering each other across the room.
+- [ ] `vybe-io` GPIO / I2C — a sensor is an address (`/sensor/near`), a button
+      is `/button/1`: indistinguishable from OSC, bindable by the same words.
+      The device's whole point.
 - [ ] mDNS `_vybe._tcp` discovery; the remote cycles faces (Alt ↑↓); MJPEG preview.
 - [ ] ASTC cache for `frames()` (~1 MB/frame instead of 9).
 - [ ] Half-resolution feedback as an option (fill rate on VideoCore VII).
 - [ ] The cube on four Pi 5 units.
 
-Consciously deferred: TS/Lua dialects, WASM, node-graph UI, `async` scripting,
-ternaries in the grammar, mesh warp, HAP (no S3TC on VideoCore — do not revisit).
+Consciously deferred: TS/Lua dialects (the Tier-2 decision picks one), WASM
+(vybe-flow's third backend, off the critical path — DECISIONS 2026-09-29),
+`async` scripting, ternaries in the grammar, mesh warp, HAP (no S3TC on
+VideoCore — do not revisit). The node-graph UI graduated from deferred to a
+plan: **vybe-flow**, below.
+
+## Then — the device: `vybe-host` (after 0.0.3 proves the wall)
+
+vybe as an appliance (VISION, "The device"): the host is a supervisor, a
+project is a folder, the default is a pointer, three tiers of work, and the
+device never runs rustc (DECISIONS 2026-09-29). Waits behind the wall kata —
+the host grows around a player that already survives a venue.
+
+- [ ] `vybe-host` daemon: registry (the folders it can see), runs the default
+      project at power-on, supervises player/apps as child processes — a
+      crash restarts or falls back to the default, never to black.
+- [ ] The API, smallest first: **status** (the remote already asks some over
+      OSC) → **media upload/download** (the checker validates before going
+      live) → **playlist** (a playlist is a patch — nothing new in the
+      player) → **switch / startup** (move the pointer) → **calibration**
+      (the keystone remote becomes one more client).
+- [ ] The appliance image: boot-to-show (host → default project, no desktop
+      in the path), read-only rootfs (projects on a data partition),
+      watchdog (a hung process reboots into the default show), atomic
+      updates (new binary/project lands beside the old; the pointer flips;
+      a bad flip flips back).
+- [ ] The Tier-2 script language: Lua via `mlua` or WASM guests (wasmtime)?
+      Decide when the first interactive work pulls it. The words are data,
+      so the binding builds the same recipes from the same table.
+- [ ] Open: one host per box with OSC between them, or one conducting the
+      cube's four? Host self-update (apt, image, or self-swap under the
+      atomic rule)? Web panel served by the host or a remote that grew up?
+
+## vybe-flow — the editor (Tauri; rehearses beside the device)
+
+The graph as a view of the patch (VISION, "The editor"): engine native behind
+Tauri commands, palette generated from the vocabulary, JIT = hot reload with a
+string for a file. Settled: the text view is the truth; layout in a sidecar
+beside the `.vy`, never in the patch (DECISIONS 2026-09-29).
+
+- [ ] **1 · The shell spike** — Tauri + one hardcoded patch on a native stage
+      window (the shell that exists; the `face-and-remote.sh` topology
+      formalized). The risk is small and mostly packaging; a day answers it.
+- [ ] **2 · `load_patch` + a textarea** — a bare live-coding pane: edit the
+      `.vy`, watch the stage, check errors inline (they cross to JS and
+      underline the line). Honest note: close to what `vybe run` + any
+      editor already gives — its value is the packaging and the error UI;
+      the editor's real new value starts at step 3.
+- [ ] **3 · The graph on top** — GraphAPI + the generated palette,
+      serializing into the same text; two socket types (chains, scalars);
+      feedback drawn as a node, never a back-edge. Graph → patch first;
+      patch → graph is v2. The textarea never goes away — it becomes the
+      patch view.
+- [ ] **4 · Polish** — sliders from `tune`, the preview pane (readback vs
+      shared texture: measured, not guessed), patch → graph round-trip, the
+      `.vy` file association, GStreamer in the bundle.
+- [ ] Open: fork tekne-flow's UI shell or lift the patterns into a fresh lean
+      app? (The graph semantics differ enough that fresh may cost less than
+      un-teaching the old one its streams.)
 
 ---
 
@@ -239,6 +312,21 @@ voronoi are the same substrate with one piece swapped.
 
 Each waits for the kata that pulls it (Golden Rule #2).
 
+- [ ] **Subpatches (`include`)** — a named sub-graph used as a node: the
+      venue's attract loop, the house color field, the standard fade. State
+      identity still by name, scoped by the include's name. Kata: two works
+      sharing one attract loop — the tenth work on the box pulls it.
+- [ ] **Playlists and folders** — `video`/`frames` over a folder with order,
+      duration, per-item `vol`; the words should make a *good* playlist a
+      short patch. Kata: the signage loop — three clips and a holding card,
+      forever.
+- [ ] **`image`** — a peer of `video` and `frames`; the gap nobody notices
+      until the signage loop's holding card is a PNG.
+- [ ] **MIDI** — one more address family (`/midi/cc/21`); every controller in
+      a booth speaks it. Kata: the remote's knobs grew up.
+- [ ] **Templates** — `vybe new --from media-player` prints the canonical
+      patch; the vocabulary teaching itself — the example is the
+      documentation.
 - [ ] `tune` lifecycle: mark-and-sweep orphaned knobs + reconcile ranges when a
       `live()` tree changes (Codex finding #3; latent until a sketch makes
       `tune()` calls conditional).
@@ -306,7 +394,9 @@ that a real piece pulls — do NOT bulk-build them.
       transforms are dedicated steps. Orthogonal, LLM-legible verbs are the product.
 - [ ] **Reprioritized by vibe-coding:** the **TS/JS sugar dialect + WASM** (Phase 2)
       rises — LLMs are most fluent in TS/JS and vibe-coding a web tool wants the
-      browser. The node-graph front-end drops in priority (deferred, not killed).
+      browser. *(2026-09-29: rebalanced again — the node-graph front-end
+      returned as **vybe-flow**, but as a view of the patch, and WASM moved
+      off the critical path behind Tauri. DECISIONS 2026-09-29.)*
 
 ---
 

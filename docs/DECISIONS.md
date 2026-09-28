@@ -1030,3 +1030,63 @@ fullscreen locally — the way out that needs no remote; and an output with a
 picture of its own size is **letterboxed** on a screen of another shape rather
 than stretched — a keystone's corners are fractions of the *declared* output,
 and on a stretched one the calibration would lie.
+
+## 2026-09-29 — The device, the language, the editor: plans merged into the horizon
+
+**Decision.** The three planning docs written on 2026-09-28 (HOST.md,
+LANGUAGE.md, FLOW.md) are merged into [VISION.md](VISION.md) (the beliefs)
+and [ROADMAP.md](ROADMAP.md) (the ordered wishes) and removed. Plans ahead of
+their katas are horizon, not scope; the repo keeps its two forward-looking
+docs, not five. The calls those docs settled, recorded here so they are not
+re-litigated:
+
+- **Tauri over a WASM port for the editor.** vybe-flow is a Tauri app: the
+  graph in a webview, the engine native behind a handful of commands, the
+  stage the existing wgpu window. Every gap the WASM path carried (no
+  GStreamer, no OSC/UDP, WebGPU compute a lottery) is not solved but
+  *absent*, and the frame brings the packaging the roadmap already wanted
+  (the `.app` with the `.vy` association, installers, an updater). The
+  browser build remains as the same frontend's third backend. *Rejected:*
+  the engine-in-the-browser editor (FLOW's first draft) — it put the
+  riskiest spike on the critical path for no artistic gain.
+- **The device never runs rustc.** Three tiers of work: the patch (instant,
+  checked, on device), the scripted app (sandboxed, on device; Lua vs WASM
+  decided when the first interactive work pulls it), Rust (compiled off
+  device — `rust <name>` leaves in the player, or a standalone binary the
+  host supervises). Process isolation instead of ABI risk: Rust has no
+  stable ABI, so hot-loading plugins would pin every one to a compiler
+  version. *Rejected:* on-device compilation — gigabytes of toolchain,
+  minutes of compiling, SD-card wear and RAM pressure against a running
+  show, to produce what a laptop cross-compiles in seconds.
+- **A project is a folder; the default is a pointer.** The host is a
+  supervisor, not a new engine: registry, power-on default, API in
+  pull-order (status → media → playlist → switch → calibration), appliance
+  rules (boot-to-show, read-only rootfs, watchdog, atomic updates — the
+  hot-reload rule at system scale).
+- **The graph is a view of the patch; the text is the truth.** The editor's
+  palette is generated from the vocabulary table, so it can never drift from
+  the language; graph → `.vy` ships before `.vy` → graph; feedback is drawn
+  as a node, never a back-edge. The graph's layout lives in a **sidecar**
+  beside the `.vy`, never in patch comments — a project is a folder, the
+  patch stays the whole truth of the work, and the kata pairs stay
+  byte-identical. *Rejected:* layout in comments (pollutes the truth,
+  breaks patch diffs).
+- **The language grows by most-said sentences, kata-gated.** The contract
+  (declarative, checkable, hot-swappable, LLM-legible), the boundary — a
+  graph of things that exist and flow is a patch; a procedure that decides
+  is a script — and the never-list (not Turing-complete, not a second Rust,
+  not a grab-bag, not faster than its katas) are now VISION text. Timers +
+  expressions in conditions lead the order: the cube's sensor scenes pull
+  them anyway.
+
+**Why merged rather than kept.** Three ambitious docs in one day, each
+hundreds of lines past any kata, is how a vision fragments: each ages
+separately, each claims authority, and LANGUAGE.md's own law ("a word ahead
+of its kata is a guess") argued against its siblings. VISION holds the
+beliefs; ROADMAP holds the order and the katas; DECISIONS holds the why;
+nothing else competes.
+
+**Consciously softened:** 2026-07-06 ("import tekne-flow's language, not its
+editor"). The editor returns — but as a front-end over the patch: the graph
+draws the language instead of rivaling it, which is what that entry actually
+feared. Its columnar reflection stands unchanged (LEGACY_FLOW.md).
