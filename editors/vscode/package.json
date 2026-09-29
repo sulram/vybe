@@ -1,13 +1,15 @@
 {
   "name": "vybe-vy",
   "displayName": "vybe patches (.vy)",
-  "description": "Syntax highlighting for vybe .vy patches. The grammar is generated from the engine's own vocabulary (`vybe grammar`).",
+  "description": "Syntax highlighting and a run command for vybe .vy patches. The grammar is generated from the engine's own vocabulary (`vybe grammar`).",
   "version": "0.0.2",
   "publisher": "vybe",
   "license": "MIT OR Apache-2.0",
   "repository": { "type": "git", "url": "https://github.com/sulram/vybe" },
   "engines": { "vscode": "^1.75.0" },
   "categories": ["Programming Languages"],
+  "main": "./extension.js",
+  "activationEvents": ["onLanguage:vy"],
   "contributes": {
     "languages": [
       {
@@ -19,6 +21,32 @@
     ],
     "grammars": [
       { "language": "vy", "scopeName": "source.vy", "path": "./syntaxes/vy.tmLanguage.json" }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "vybe.runPatch",
+        "title": "Run Patch",
+        "category": "vybe",
+        "icon": "$(play)"
+      }
+    ],
+    "menus": {
+      "editor/title/run": [
+        { "command": "vybe.runPatch", "when": "resourceLangId == vy", "group": "navigation" }
+      ],
+      "commandPalette": [
+        { "command": "vybe.runPatch", "when": "resourceLangId == vy" }
+      ]
+    },
+    "configuration": {
+      "title": "vybe",
+      "properties": {
+        "vybe.command": {
+          "type": "string",
+          "default": "vybe",
+          "markdownDescription": "The vybe CLI to prefix `run <file>` with. Left at the default, the engine repo (where `crates/vybe-cli` exists) runs `cargo run -p vybe-cli --`; anywhere else, `vybe` from PATH."
+        }
+      }
+    }
   }
 }

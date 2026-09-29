@@ -1,7 +1,20 @@
-# vybe patches (.vy) — syntax highlighting
+# vybe patches (.vy) — highlighting + run
 
 Highlighting for vybe's `.vy` patches in VS Code (and anything else that reads
-TextMate grammars: Cursor, Zed, Sublime, GitHub).
+TextMate grammars: Cursor, Zed, Sublime, GitHub), plus a run command the way
+rust-analyzer runs an example.
+
+## Run a patch
+
+A `▶ run patch` lens sits on the first line of any `.vy` (also: the play
+button in the editor title, or **vybe: Run Patch** in the palette). It saves
+the file and runs it in a `vybe` terminal — run once, then every save
+hot-reloads into the playing show; re-running replaces the terminal (one show
+at a time).
+
+The command prefix comes from the `vybe.command` setting (default `vybe`,
+from PATH). Inside the engine repo — `crates/vybe-cli` present — it becomes
+`cargo run -p vybe-cli --` on its own, so this workspace needs no config.
 
 ## Install (from this repo)
 
