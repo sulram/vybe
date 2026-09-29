@@ -43,13 +43,29 @@ async function runPatch(uri) {
   terminal.sendText(`${runner(cwd)} run ${quoted(file)}`);
 }
 
-// One lens on the first line, rust-analyzer style: ▶ run patch.
+// rust-analyzer anchors its lens on `fn main`; a patch's main is its `out`
+// line — absent that, the first line that says anything.
+function anchorLine(document) {
+  let firstContent = 0;
+  let found = false;
+  for (let i = 0; i < document.lineCount; i++) {
+    const text = document.lineAt(i).text.trim();
+    if (/^out\b/.test(text)) return i;
+    if (!found && text && !text.startsWith('#')) {
+      firstContent = i;
+      found = true;
+    }
+  }
+  return firstContent;
+}
+
 const lenses = {
   provideCodeLenses(document) {
-    const top = new vscode.Range(0, 0, 0, 0);
+    const line = anchorLine(document);
     return [
-      new vscode.CodeLens(top, {
-        title: '▶ run patch — hot-reloads on save',
+      new vscode.CodeLens(new vscode.Range(line, 0, line, 0), {
+        title: '▶ Run',
+        tooltip: 'vybe run — hot-reloads on save',
         command: 'vybe.runPatch',
         arguments: [document.uri],
       }),

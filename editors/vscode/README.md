@@ -6,11 +6,11 @@ rust-analyzer runs an example.
 
 ## Run a patch
 
-A `▶ run patch` lens sits on the first line of any `.vy` (also: the play
-button in the editor title, or **vybe: Run Patch** in the palette). It saves
-the file and runs it in a `vybe` terminal — run once, then every save
-hot-reloads into the playing show; re-running replaces the terminal (one show
-at a time).
+A `▶ Run` lens sits on the patch's `out` line — its `fn main` — or on the
+first content line when no `out` is declared (also: the play button in the
+editor title, or **vybe: Run Patch** in the palette). It saves the file and
+runs it in a `vybe` terminal — run once, then every save hot-reloads into the
+playing show; re-running replaces the terminal (one show at a time).
 
 The command prefix comes from the `vybe.command` setting (default `vybe`,
 from PATH). Inside the engine repo — `crates/vybe-cli` present — it becomes
