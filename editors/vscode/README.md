@@ -6,11 +6,15 @@ rust-analyzer runs an example.
 
 ## Run a patch
 
-A `▶ Run` lens sits on the patch's `out` line — its `fn main` — or on the
-first content line when no `out` is declared (also: the play button in the
-editor title, or **vybe: Run Patch** in the palette). It saves the file and
-runs it in a `vybe` terminal — run once, then every save hot-reloads into the
-playing show; re-running replaces the terminal (one show at a time).
+A `▶ Run | Check` lens sits on the patch's `out` line — its `fn main` — or on
+the first content line when no `out` is declared (also: the play button in
+the editor title, or **vybe: Run/Check Patch** in the palette). Both save the
+file first. **Run** plays the patch in a `vybe` terminal — run once, then
+every save hot-reloads into the playing show; re-running replaces the
+terminal (one show at a time). **Check** proves the patch without a GPU in
+its own terminal, so a running show stays up — the patch's two verbs, where
+`.rs` has Run | Debug (a patch has no call stack to step; its debugger is
+check, headless render, and hot reload).
 
 The command prefix comes from the `vybe.command` setting (default `vybe`,
 from PATH). Inside the engine repo — `crates/vybe-cli` present — it becomes

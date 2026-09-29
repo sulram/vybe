@@ -28,6 +28,12 @@
         "title": "Run Patch",
         "category": "vybe",
         "icon": "$(play)"
+      },
+      {
+        "command": "vybe.checkPatch",
+        "title": "Check Patch",
+        "category": "vybe",
+        "icon": "$(check)"
       }
     ],
     "menus": {
@@ -35,7 +41,8 @@
         { "command": "vybe.runPatch", "when": "resourceLangId == vy", "group": "navigation" }
       ],
       "commandPalette": [
-        { "command": "vybe.runPatch", "when": "resourceLangId == vy" }
+        { "command": "vybe.runPatch", "when": "resourceLangId == vy" },
+        { "command": "vybe.checkPatch", "when": "resourceLangId == vy" }
       ]
     },
     "configuration": {
