@@ -1,0 +1,19 @@
+[package]
+name = "vybe-host"
+version = "0.0.2"
+edition = "2024"
+rust-version = "1.85"
+description = "The host daemon: boots into the default project, keeps the show playing, serves the control API the web admin speaks."
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sulram/vybe"
+publish = false
+
+[[bin]]
+name = "vybe-host"
+path = "src/main.rs"
+
+# Cut by dependency: this crate exists so the core never meets an HTTP
+# server or a process table. [dependencies] stays empty until the first
+# kata pulls one — supervision and the API land when the appliance needs
+# them, not before. What will arrive, and why, is the README's job.
+[dependencies]

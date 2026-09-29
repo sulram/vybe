@@ -85,6 +85,9 @@ settled decisions in [DECISIONS.md](docs/DECISIONS.md); what we intend to build 
   - `crates/vybe-io` (OSC over UDP; rosc) · `crates/keystone` (the calibration
     file; depends on nothing) · `crates/vybe-remote` (the OSC protocol, both
     ends, + the remote sketch)
+  - `crates/vybe-host` (the daemon: boots into the default project, supervises
+    the engine, serves the control API the web admin speaks; the OS/appliance
+    side — image, firstboot, naming, fleet — lives in tekne-studio/vybe-pi)
 - **Integrations enter through seams, never through the core**: one trait or
   registry inside the engine (`Binding`, `Overlay`, `tune`); library glue
   behind it, in its own crate. No `cfg` sprawl, no third-party types in core

@@ -175,7 +175,8 @@ wgpu, hidden) · `shell` (window) · `tweak` (the optional egui panel).
 Around it, a workspace of crates **cut by dependency, not by platform**:
 `vybe-cli` (the `vybe` command) · `vybe-video` (video with sound, through
 GStreamer) · `vybe-io` (OSC) · `vybe-remote` (the remote
-protocol, both ends, and the remote itself) · `keystone` (a projector's
+protocol, both ends, and the remote itself) · `vybe-host` (the daemon that
+boots into the show and keeps it playing) · `keystone` (a projector's
 calibration as a file; depends on nothing).
 
 ## Where it's going
